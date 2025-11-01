@@ -1,80 +1,57 @@
 //
 //  Server.swift
-//  SMART-on-FHIR
+//  Swift-SMART
 //
-//  Created by Pascal Pfiffner on 6/11/14.
-//  Copyright (c) 2014 SMART Health IT. All rights reserved.
+//  Rewritten for FHIR R5 + HTTPClient/FHIRClient architecture.
 //
 
+import Combine
+import CombineSchedulers
+import FHIRClient
 import Foundation
+import HTTPClient
+import HTTPClientLive
+import ModelsR5
+import OAuth2
 
+open class Server {
+	public let baseURL: URL
+	public let aud: String
 
-/**
-Representing the FHIR resource server a client connects to.
+	public private(set) var name: String?
 
-This implementation holds on to an `Auth` instance to handle authentication. It is automatically instantiated with properties from the
-settings dictionary provided upon `Client` initalization or from the server's cabability statement.
-
-The server's cabability statement is automatically downloaded the first time it's needed for various tasks, such as instantiating the `Auth`
-instance or validating/executing operations.
-
-A server manages its own NSURLSession, either with an optional delegate provided via `sessionDelegate` or simply the system shared
-session. Subclasses can change this behavior by overriding `createDefaultSession` or any of the other request-related methods.
-*/
-open class Server: FHIROpenServer, OAuth2RequestPerformer {
-	
-	/// The service URL as a string, as specified during initalization to be used as `aud` parameter.
-	public final let aud: String
-	
-	/// An optional name of the server; will be read from cabability statement unless manually assigned.
-	public final var name: String?
-	
-	/// The authorization to use with the server.
 	var auth: Auth? {
 		didSet {
-			if let auth = auth {
-				if let oauth = auth.oauth {
-					oauth.sessionDelegate = sessionDelegate
-					oauth.onBeforeDynamicClientRegistration = onBeforeDynamicClientRegistration
-					if let logger = logger {
-						oauth.logger = logger
-					}
+			oauthInterceptor.auth = auth
+
+			if let oauth: OAuth2 = auth?.oauth {
+				oauth.onBeforeDynamicClientRegistration = onBeforeDynamicClientRegistration
+				if let logger = logger {
+					oauth.logger = logger
 				}
-				logger?.debug("SMART", msg: "Initialized server auth of type “\(auth.type.rawValue)”")
+			}
+
+			if let auth {
+				logger?.debug(
+					"SMART", msg: "Initialized server auth of type “\(auth.type.rawValue)”")
 			}
 		}
 	}
-	
-	/// Settings to be applied to the Auth instance.
+
 	var authSettings: OAuth2JSON? {
 		didSet {
 			didSetAuthSettings()
 		}
 	}
-	
-	/// Authenticated identity and profile token of end user; Assigned when scopes `openid` and `profile` are used.
+
 	public var idToken: String? {
-		get { return auth?.oauth?.idToken }
+		auth?.oauth?.idToken
 	}
-	
-	/// The refresh token provided with the access token; Issuing a refresh token is optional at the discretion of the authorization server.
+
 	public var refreshToken: String? {
-		get { return auth?.oauth?.refreshToken }
+		auth?.oauth?.refreshToken
 	}
-	
-	var mustAbortAuthorization = false
-	
-	/// An optional NSURLSessionDelegate.
-	open var sessionDelegate: URLSessionDelegate? {
-		didSet {
-			session = nil
-			if let oauth = auth?.oauth {
-				oauth.sessionDelegate = sessionDelegate
-			}
-		}
-	}
-	
-	/// Allow to inject a custom OAuth2DynReg class and/or setup.
+
 	open var onBeforeDynamicClientRegistration: ((URL) -> OAuth2DynReg)? {
 		didSet {
 			if let oauth = auth?.oauth {
@@ -82,248 +59,335 @@ open class Server: FHIROpenServer, OAuth2RequestPerformer {
 			}
 		}
 	}
-	
-	/// The logger to use.
+
 	open var logger: OAuth2Logger? {
 		didSet {
 			auth?.oauth?.logger = logger
 		}
 	}
-	
-	
-	/**
-	Main initializer. Makes sure the base URL ends with a "/" to facilitate URL generation later on.
-	
-	- parameter baseURL: The base URL of the server
-	- parameter auth:    A dictionary with authentication settings, passed on to the `Auth` initializer
-	*/
-	public required init(baseURL base: URL, auth: OAuth2JSON? = nil) {
-		aud = base.absoluteString
-		authSettings = auth
-		super.init(baseURL: base, auth: auth)
+
+	public private(set) var fhirClient: FHIRClient
+
+	public private(set) var launchContext: LaunchContext?
+
+	public var mustAbortAuthorization = false
+
+	private let receiveQueue: AnySchedulerOf<DispatchQueue>
+	private let oauthInterceptor: OAuth2BearerInterceptor
+	private let httpClient: HTTPClient
+	private let configurationDecoder: JSONDecoder = {
+		JSONDecoder()
+	}()
+
+	private let configurationQueue = DispatchQueue(label: "SMART.Server.Configuration")
+	private var cachedSMARTConfiguration: SMARTConfiguration?
+	private var configurationTask: _Concurrency.Task<SMARTConfiguration, Error>?
+	private var cancellables = Set<AnyCancellable>()
+
+	public init(
+		baseURL: URL,
+		auth: OAuth2JSON? = nil,
+		httpClient: HTTPClient? = nil,
+		receiveQueue: AnySchedulerOf<DispatchQueue> = .main
+	) {
+		baseURL.assertAbsolute()
+
+		self.baseURL = baseURL
+		self.aud = baseURL.absoluteString
+		self.authSettings = auth
+		self.receiveQueue = receiveQueue
+
+		self.oauthInterceptor = OAuth2BearerInterceptor(auth: nil)
+
+		if let httpClient {
+			self.httpClient = httpClient
+		} else {
+			let configuration = URLSessionConfiguration.default
+			self.httpClient = DefaultHTTPClient(
+				urlSessionConfiguration: configuration,
+				interceptors: [oauthInterceptor]
+			)
+		}
+
+		self.fhirClient = FHIRClient(
+			server: baseURL,
+			httpClient: self.httpClient,
+			receiveQueue: receiveQueue
+		)
+
 		didSetAuthSettings()
 	}
-	
-	func didSetAuthSettings() {
-		if !instantiateAuthFromAuthSettings(), let verbose = authSettings?["verbose"] as? Bool, verbose {
-			logger = OAuth2DebugLogger()
-		}
-	}
-	
-	
-	// MARK: - Requests
-	
-	/**
-	Instantiate the server's default URLSession.
-	
-	- returns: The URLSession created
-	*/
-	override open func createDefaultSession() -> URLSession {
-		if let delegate = sessionDelegate {
-			return Foundation.URLSession(configuration: URLSessionConfiguration.default, delegate: delegate, delegateQueue: nil)
-		}
-		return super.createDefaultSession()
-	}
-	
-	/**
-	Return a URLRequest for the given url, possibly already signed, that can be further configured.
-	
-	- parameter url: The URL the request will work against
-	- returns:       A preconfigured URLRequest
-	*/
-	override open func configurableRequest(for url: URL) -> URLRequest {
-		return auth?.signedRequest(forURL: url) ?? super.configurableRequest(for: url)
-	}
-	
-	
-	// MARK: - FHIROpenServer
-	
-	open override func perform(request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionTask? {
-		logger?.debug("SMART", msg: "--->  \(request.httpMethod ?? "???") \(request.url?.description ?? "No URL")")
-		logger?.trace("SMART", msg: "REQUEST\n\(String(describing: request))\n---")
-		return super.perform(request: request) { data, response, error in
-			self.logger?.trace("SMART", msg: "RESPONSE\n\(response.debugDescription)\n---")
-			self.logger?.debug("SMART", msg: "<---  \((response as? HTTPURLResponse)?.statusCode ?? 999) (\(data?.count ?? 0) Byte)")
-			completionHandler(data, response, error)
-		}
-	}
-	
-	
-	// MARK: - Server Capability Statement
-	
-	override open func didSetCapabilityStatement(_ cabability: CapabilityStatement) {
-		if nil == name, let cName = cabability.name?.string {
-			name = cName
-		}
-		super.didSetCapabilityStatement(cabability)
-	}
-	
-	override open func didFindCapabilityStatementRest(_ rest: CapabilityStatementRest) {
-		super.didFindCapabilityStatementRest(rest)
-		
-		// initialize Auth; if we can't find a suitable Auth we'll use one for "no auth"
-		if let security = rest.security {
-			auth = Auth(fromCapabilitySecurity: security, server: self, settings: authSettings)
-		}
-		if nil == auth {
-			auth = Auth(type: .none, server: self, settings: authSettings)
-			logger?.debug("SMART", msg: "Server seems to be open, proceeding with none-type auth")
-		}
-	}
-	
-	
-	// MARK: - Authorization
-	
-	/// The auth credentials currently in use by the receiver.
-	open var authClientCredentials: (id: String, secret: String?, name: String?)? {
-		if let clientId = auth?.oauth?.clientId, !clientId.isEmpty {
-			return (id: clientId, secret: auth?.oauth?.clientSecret, name: auth?.oauth?.clientName)
-		}
-		return nil
-	}
-	
-	/**
-	Attempt to instantiate our `Auth` instance from `authSettings` and assign to our `auth` ivar.
-	*/
-	func instantiateAuthFromAuthSettings() -> Bool {
-		var authType: AuthType? = nil
-		if let typ = authSettings?["authorize_type"] as? String {
-			authType = AuthType(rawValue: typ)
-		}
-		if nil == authType || .none == authType! {
-			if let _ = authSettings?["authorize_uri"] as? String {
-				if let _ = authSettings?["token_uri"] as? String {
-					authType = .codeGrant
-				}
-				else {
-					authType = .implicitGrant
-				}
+
+	// MARK: - Discovery
+
+	open func getSMARTConfiguration(
+		forceRefresh: Bool = false,
+		completion: @escaping (Result<SMARTConfiguration, Error>) -> Void
+	) {
+		let task = startSMARTConfigurationTask(forceRefresh: forceRefresh)
+
+		_Concurrency.Task {
+			do {
+				let configuration = try await task.value
+				completion(.success(configuration))
+			} catch {
+				completion(.failure(error))
 			}
 		}
-		if let type = authType {
-			auth = Auth(type: type, server: self, settings: authSettings)
-			return true
-		}
-		return false
 	}
-	
-	/**
-	Ensures that the server is ready to perform requests before calling the callback.
-	
-	Being "ready" in this case entails holding on to an `Auth` instance. Such an instance is automatically created if either the client
-	init settings are sufficient (i.e. contain an "authorize_uri" and optionally a "token_uri" and a "client_id" or "registration_uri") or
-	after the cabability statement has been fetched.
-	*/
-	open func ready(callback: @escaping (FHIRError?) -> ()) {
-		if nil != auth || instantiateAuthFromAuthSettings() {
+
+	private func startSMARTConfigurationTask(forceRefresh: Bool)
+		-> _Concurrency.Task<SMARTConfiguration, Error>
+	{
+		configurationQueue.sync {
+			if !forceRefresh, let cachedSMARTConfiguration {
+				return _Concurrency.Task(priority: nil) { cachedSMARTConfiguration }
+			}
+
+			if !forceRefresh, let configurationTask {
+				return configurationTask
+			}
+
+			let task = _Concurrency.Task<SMARTConfiguration, Error> {
+				let wellKnownURL = SMARTConfiguration.wellKnownURL(for: self.baseURL)
+				var request = URLRequest(url: wellKnownURL)
+				request.httpMethod = "GET"
+
+				let response = try await self.httpClient.sendAsync(
+					request: request, interceptors: [])
+
+				guard (200..<300).contains(response.status.rawValue) else {
+					throw SMARTConfigurationError.invalidHTTPStatus(response.status.rawValue)
+				}
+
+				let configuration = try self.configurationDecoder.decode(
+					SMARTConfiguration.self, from: response.data)
+
+				self.configurationQueue.sync {
+					self.cachedSMARTConfiguration = configuration
+					self.configurationTask = nil
+				}
+
+				return configuration
+			}
+
+			configurationTask = task
+			return task
+		}
+	}
+
+	// MARK: - Readiness
+
+	open func ready(callback: @escaping (Error?) -> Void) {
+		if auth != nil {
 			callback(nil)
 			return
 		}
-		
-		// if we haven't initialized the auth instance we likely didn't fetch the server metadata yet
-		getCapabilityStatement() { error in
-			if nil != self.auth {
-				callback(nil)
+
+		getSMARTConfiguration { [weak self] result in
+			guard let self else {
+				callback(SMARTError.configuration("Server deallocated"))
+				return
 			}
-			else {
-				callback(error ?? FHIRError.error("Failed to detect the authorization method from server metadata"))
+
+			switch result {
+			case .success(let configuration):
+				self.mergeAuthSettings(with: configuration)
+
+				if self.auth != nil || self.instantiateAuthFromAuthSettings() {
+					callback(nil)
+				} else {
+					callback(
+						SMARTError.configuration(
+							"Failed to detect the authorization method from SMART configuration"))
+				}
+
+			case .failure(let error):
+				callback(error)
 			}
 		}
 	}
-	
-	/**
-	Ensures that the receiver is ready, then calls the auth method's `authorize()` method.
-	
-	- parameter properties: The auth properties to use
-	- parameter callback:   Callback to call when authorization is complete, providing the chosen patient (if the patient scope was
-	                        provided) or an error, if any
-	*/
-	open func authorize(with properties: SMARTAuthProperties, callback: @escaping ((_ patient: Patient?, _ error: Error?) -> Void)) {
-		ready() { error in
+
+	private func mergeAuthSettings(with configuration: SMARTConfiguration) {
+		var settings = authSettings ?? OAuth2JSON()
+
+		if settings["authorize_uri"] == nil {
+			settings["authorize_uri"] = configuration.authorizationEndpoint.absoluteString
+		}
+		if settings["token_uri"] == nil {
+			settings["token_uri"] = configuration.tokenEndpoint.absoluteString
+		}
+		if settings["registration_uri"] == nil,
+			let registration = configuration.registrationEndpoint
+		{
+			settings["registration_uri"] = registration.absoluteString
+		}
+		if settings["aud"] == nil {
+			settings["aud"] = aud
+		}
+
+		authSettings = settings
+	}
+
+	private func didSetAuthSettings() {
+		_ = instantiateAuthFromAuthSettings()
+	}
+
+	@discardableResult
+	func instantiateAuthFromAuthSettings() -> Bool {
+		guard let authSettings else { return false }
+
+		var authType: AuthType? = nil
+
+		if let typeString = authSettings["authorize_type"] as? String {
+			authType = AuthType(rawValue: typeString)
+		}
+
+		if authType == nil || authType == AuthType.none {
+			if authSettings["authorize_uri"] != nil {
+				authType = authSettings["token_uri"] != nil ? .codeGrant : .implicitGrant
+			}
+		}
+
+		guard let type = authType else {
+			return false
+		}
+
+		auth = Auth(type: type, server: self, settings: authSettings)
+		return true
+	}
+
+	// MARK: - Authorization Flow
+
+	open func authorize(
+		with properties: SMARTAuthProperties,
+		callback: @escaping (_ patient: Patient?, _ error: Error?) -> Void
+	) {
+		ready { error in
 			if self.mustAbortAuthorization {
 				self.mustAbortAuthorization = false
 				callback(nil, nil)
+				return
 			}
-			else if nil != error || nil == self.auth {
-				callback(nil, error ?? FHIRError.error("Client error, no auth instance created"))
+
+			if let error {
+				callback(nil, error)
+				return
 			}
-			else {
-				self.auth!.authorize(with: properties) { parameters, error in
-					if self.mustAbortAuthorization {
-						self.mustAbortAuthorization = false
-						callback(nil, nil)
-					}
-					else if let error = error {
-						callback(nil, error)
-					}
-					else if let patient = parameters?["patient_resource"] as? Patient {		// native patient list auth flow will deliver a Patient instance
-						callback(patient, nil)
-					}
-					else if let patientId = parameters?["patient"] as? String {
-						Patient.read(patientId, server: self) { resource, error in
-							self.logger?.debug("SMART", msg: "Did read patient \(String(describing: resource)) with error \(String(describing: error))")
-							callback(resource as? Patient, error)
+
+			guard let auth = self.auth else {
+				callback(nil, SMARTError.missingAuthorization)
+				return
+			}
+
+			auth.authorize(with: properties) { parameters, error in
+				if self.mustAbortAuthorization {
+					self.mustAbortAuthorization = false
+					callback(nil, nil)
+					return
+				}
+
+				if let error {
+					callback(nil, error)
+					return
+				}
+
+				if let patient = parameters?["patient_resource"] as? ModelsR5.Patient {
+					callback(patient, nil)
+					return
+				}
+
+				if let patientId = parameters?["patient"] as? String {
+					self.fetchPatient(id: patientId) { result in
+						self.logger?.debug("SMART", msg: "Did read patient with result \(result)")
+						switch result {
+						case .success(let patient):
+							callback(patient, nil)
+						case .failure(let error):
+							callback(nil, error)
 						}
 					}
-					else {
-						callback(nil, nil)
-					}
+					return
 				}
+
+				callback(nil, nil)
 			}
 		}
 	}
-	
-	/**
-	Aborts ongoing authorization and requests session.
-	*/
+
 	open func abort() {
-		abortAuthorization()
-		abortSession()
-	}
-	
-	func abortAuthorization() {
 		mustAbortAuthorization = true
-		if nil != auth {
-			auth!.abort()
-		}
+		auth?.abort()
 	}
-	
-	/**
-	Resets authorization state - including deletion of any known access and refresh tokens.
-	*/
+
 	func reset() {
 		abort()
 		auth?.reset()
 	}
-	
-	
-	// MARK: - Client Registration
-	
-	/**
-	Runs dynamic client registration unless the client has a client id (or no registration URL is known). Since this happens automatically
-	during `authorize()` you probably won't need to call this method explicitly.
-	
-	- parameter callback: The callback to call when completed or failed; if both json and error is nil no registration was attempted
-	*/
-	open func registerIfNeeded(callback: @escaping ((_ json: OAuth2JSON?, _ error: Error?) -> Void)) {
-		ready() { error in
-			if nil != error || nil == self.auth {
-				callback(nil, error ?? FHIRError.error("Client error, no auth instance created"))
+
+	open var authClientCredentials: (id: String, secret: String?, name: String?)? {
+		guard let oauth = auth?.oauth, let clientId = oauth.clientId, !clientId.isEmpty else {
+			return nil
+		}
+		return (clientId, oauth.clientSecret, oauth.clientName)
+	}
+
+	open func registerIfNeeded(callback: @escaping (_ json: OAuth2JSON?, _ error: Error?) -> Void) {
+		ready { error in
+			if let error {
+				callback(nil, error)
+				return
 			}
-			else if let oauth = self.auth?.oauth {
-				oauth.registerClientIfNeeded(callback: callback)
+
+			guard let oauth = self.auth?.oauth else {
+				callback(nil, SMARTError.missingAuthorization)
+				return
 			}
-			else {
-				callback(nil, nil)
-			}
+
+			oauth.registerClientIfNeeded(callback: callback)
 		}
 	}
-	
+
 	func forgetClientRegistration() {
 		auth?.forgetClientRegistration()
 		auth = nil
 	}
+
+	func updateLaunchContext(_ context: LaunchContext?) {
+		launchContext = context
+	}
+
+	func fetchPatient(id: String, completion: @escaping (Result<ModelsR5.Patient, Error>) -> Void) {
+		let operation = DecodingFHIRRequestOperation<ModelsR5.Patient>(
+			path: "Patient/\(id)",
+			headers: ["Accept": "application/fhir+json"]
+		)
+
+		var cancellable: AnyCancellable?
+		cancellable = fhirClient.execute(operation: operation)
+			.sink(
+				receiveCompletion: { [weak self] result in
+					if let cancellable {
+						self?.cancellables.remove(cancellable)
+					}
+					if case .failure(let error) = result {
+						completion(.failure(error))
+					}
+				},
+				receiveValue: { patient in
+					completion(.success(patient))
+				})
+
+		if let cancellable {
+			cancellables.insert(cancellable)
+		}
+	}
+}
+
+extension URL {
+	fileprivate func assertAbsolute() {
+		precondition(scheme != nil, "Server baseURL must be absolute")
+	}
 }
 
 public typealias FHIRBaseServer = Server
-

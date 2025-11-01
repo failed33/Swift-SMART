@@ -7,22 +7,20 @@
 //
 
 import Foundation
+import ModelsR5
 
-
-/**
-An enum to define how a list of patients should be ordered.
-*/
+/// An enum to define how a list of patients should be ordered.
 public enum PatientListOrder: String {
-	
+
 	/// Order by given name, family name, birthday.
 	case nameGivenASC = "given,family,birthdate"
-	
+
 	// Order by family name, given name, birthday.
 	case nameFamilyASC = "family,given,birthdate"
-	
+
 	/// Order by birthdate, family name, given name.
 	case birthDateASC = "birthdate,family,given"
-	
+
 	/**
 	Applies the receiver's ordering to a given list of patients.
 	
@@ -32,7 +30,7 @@ public enum PatientListOrder: String {
 	func ordered(_ patients: [Patient]) -> [Patient] {
 		switch self {
 		case .nameGivenASC:
-			return patients.sorted() {
+			return patients.sorted {
 				let given = $0.compareNameGiven(toPatient: $1)
 				if 0 != given {
 					return given < 0
@@ -45,7 +43,7 @@ public enum PatientListOrder: String {
 				return birth < 0
 			}
 		case .nameFamilyASC:
-			return patients.sorted() {
+			return patients.sorted {
 				let family = $0.compareNameFamily(toPatient: $1)
 				if 0 != family {
 					return family < 0
@@ -58,7 +56,7 @@ public enum PatientListOrder: String {
 				return birth < 0
 			}
 		case .birthDateASC:
-			return patients.sorted() {
+			return patients.sorted {
 				let birth = $0.compareBirthDate(toPatient: $1)
 				if 0 != birth {
 					return birth < 0
@@ -74,90 +72,90 @@ public enum PatientListOrder: String {
 	}
 }
 
-
 extension Patient {
-	
+
 	func compareNameGiven(toPatient: Patient) -> Int {
-		let a = name?.first?.given?.first ?? "ZZZ"
-		let b = toPatient.name?.first?.given?.first ?? "ZZZ"
-		if a < b {
-			return -1
-		}
-		if a > b {
-			return 1
-		}
-		// TODO: look at other first names?
-		return 0
+		let a = name?.first?.given?.first?.value?.string ?? "ZZZ"
+		let b = toPatient.name?.first?.given?.first?.value?.string ?? "ZZZ"
+		return a.compare(b).rawValue
 	}
-	
+
 	func compareNameFamily(toPatient: Patient) -> Int {
 		let a = name?.first?.family?.string ?? "ZZZ"
 		let b = toPatient.name?.first?.family?.string ?? "ZZZ"
-		if a < b {
-			return -1
-		}
-		if a > b {
-			return 1
-		}
-		// TODO: lookt at other family names?
-		return 0
+		return a.compare(b).rawValue
 	}
-	
+
 	func compareBirthDate(toPatient: Patient) -> Int {
 		let nodate = Date(timeIntervalSince1970: -70 * 365.25 * 24 * 3600)
 		let a = birthDate?.nsDate ?? nodate
-		return a.compare(toPatient.birthDate?.nsDate ?? nodate).rawValue
+		let b = toPatient.birthDate?.nsDate ?? nodate
+		return a.compare(b).rawValue
 	}
-	
+
 	var displayNameFamilyGiven: String {
-		if let humanName = name?.first {
-			let given = humanName.given?.reduce(nil) { (nil != $0 ? ($0! + " ") : "") + $1.string }
-			let family = humanName.family
-			if let given = given {
-				if let family = family?.string {
-					return "\(family), \(given)"
-				}
-				return given
-			}
-			else if let family = family?.string {
-				let prefix = (.male == gender) ? "Mr.".fhir_localized : "Ms.".fhir_localized
-				return "\(prefix) \(family)"
-			}
+		guard let humanName = name?.first else {
+			return "Unnamed Patient".fhir_localized
 		}
+
+		let givenNames = humanName.given?
+			.compactMap { primitive -> String? in
+				guard let value = primitive.value?.string, !value.isEmpty else { return nil }
+				return value
+			}
+			.joined(separator: " ")
+
+		let familyName = humanName.family?.string
+
+		if let given = givenNames, !given.isEmpty {
+			if let family = familyName, !family.isEmpty {
+				return "\(family), \(given)"
+			}
+			return given
+		}
+
+		if let family = familyName, !family.isEmpty {
+			let prefix = (gender?.value == .male) ? "Mr.".fhir_localized : "Ms.".fhir_localized
+			return "\(prefix) \(family)"
+		}
+
 		return "Unnamed Patient".fhir_localized
 	}
-	
+
 	var currentAge: String {
-		if nil == birthDate {
+		guard let dateOfBirth = birthDate?.nsDate else {
 			return ""
 		}
-		
+
 		let calendar = Calendar.current
-		var comps = calendar.dateComponents([.year, .month], from: birthDate!.nsDate, to: Date())
-		
-		// babies
-		if let year = comps.year, year < 1 {
-			if let month = comps.month, month < 1 {
-				comps = calendar.dateComponents([.day], from: birthDate!.nsDate, to: Date())
-				if let day = comps.day, day < 1 {
+		var components = calendar.dateComponents([.year, .month], from: dateOfBirth, to: Date())
+
+		if let year = components.year, year < 1 {
+			if let month = components.month, month < 1 {
+				components = calendar.dateComponents([.day], from: dateOfBirth, to: Date())
+				if let day = components.day, day < 1 {
 					return "just born".fhir_localized
 				}
-				let str = (1 == comps.day) ? "day old".fhir_localized : "days old".fhir_localized
-				return "\(comps.day ?? 0) \(str)"
+				let label =
+					(components.day == 1) ? "day old".fhir_localized : "days old".fhir_localized
+				return "\(components.day ?? 0) \(label)"
 			}
-			let str = (1 == comps.day) ? "month old".fhir_localized : "months old".fhir_localized
-			return "\(comps.month ?? 0) \(str)"
+			let label =
+				(components.month == 1) ? "month old".fhir_localized : "months old".fhir_localized
+			return "\(components.month ?? 0) \(label)"
 		}
-		
-		// kids and adults
-		if 0 != comps.month {
-			let yr = (1 == comps.year) ? "yr".fhir_localized : "yrs".fhir_localized
-			let mth = (1 == comps.month) ? "mth".fhir_localized : "mths".fhir_localized
-			return "\(comps.year!) \(yr), \(comps.month!) \(mth)"
+
+		if let months = components.month, months != 0, let years = components.year {
+			let yearLabel = (years == 1) ? "yr".fhir_localized : "yrs".fhir_localized
+			let monthLabel = (months == 1) ? "mth".fhir_localized : "mths".fhir_localized
+			return "\(years) \(yearLabel), \(months) \(monthLabel)"
 		}
-		
-		let yr = (1 == comps.year) ? "year old".fhir_localized : "years old".fhir_localized
-		return "\(comps.year!) \(yr)"
+
+		if let years = components.year {
+			let yearLabel = (years == 1) ? "year old".fhir_localized : "years old".fhir_localized
+			return "\(years) \(yearLabel)"
+		}
+
+		return ""
 	}
 }
-
