@@ -29,7 +29,7 @@ jobs:
           set -eo pipefail
           PROF_DATA=$(swift test --show-codecov-path)
           BIN_PATH=$(swift test --show-bin-path)
-          TEST_BUNDLE=$(find "$BIN_PATH" -name "*Tests.xctest" -maxdepth 1 -print -quit)
+          TEST_BUNDLE=$(find "$BIN_PATH" -name "*Tests.xctest" -type d -print -quit)
           if [[ -z "$TEST_BUNDLE" ]]; then
             echo "Unable to locate test bundle" >&2
             exit 1
@@ -37,49 +37,48 @@ jobs:
           TEST_EXECUTABLE="$TEST_BUNDLE/Contents/MacOS/$(basename "$TEST_BUNDLE" .xctest)"
           xcrun llvm-cov report "$TEST_EXECUTABLE" --instr-profile "$PROF_DATA" > coverage.txt
           python3 - <<'PY'
-import sys
+          import sys
 
-overall_threshold = 80.0
-targets = [
-    ("Sources/Client/", 100.0),
-    ("Sources/HTTPClient/", 90.0),
-    ("Sources/FHIRClient/", 90.0),
-]
+          overall_threshold = 80.0
+          targets = [
+              ("Sources/Client/", 100.0),
+              ("Sources/HTTPClient/", 90.0),
+              ("Sources/FHIRClient/", 90.0),
+          ]
 
-def parse_percentage(line: str):
-    parts = line.strip().split()
-    if len(parts) < 2:
-        return None
-    value = parts[-2].rstrip('%')
-    try:
-        return float(value)
-    except ValueError:
-        return None
+          def parse_percentage(line: str):
+              parts = line.strip().split()
+              if len(parts) < 2:
+                  return None
+              value = parts[-2].rstrip('%')
+              try:
+                  return float(value)
+              except ValueError:
+                  return None
 
-with open('coverage.txt', 'r', encoding='utf-8') as handle:
-    lines = handle.readlines()
+          with open('coverage.txt', 'r', encoding='utf-8') as handle:
+              lines = handle.readlines()
 
-overall = None
-for line in reversed(lines):
-    pct = parse_percentage(line)
-    if pct is not None:
-        overall = pct
-        break
+          overall = None
+          for line in reversed(lines):
+              pct = parse_percentage(line)
+              if pct is not None:
+                  overall = pct
+                  break
 
-if overall is None:
-    sys.exit('Failed to determine overall coverage')
+          if overall is None:
+              sys.exit('Failed to determine overall coverage')
 
-if overall < overall_threshold:
-    sys.exit(f'Overall coverage {overall:.2f}% below threshold {overall_threshold}%')
+          if overall < overall_threshold:
+              sys.exit(f'Overall coverage {overall:.2f}% below threshold {overall_threshold}%')
 
-for prefix, threshold in targets:
-    prefix_coverages = [parse_percentage(line) for line in lines if prefix in line]
-    prefix_coverages = [pct for pct in prefix_coverages if pct is not None]
-    if not prefix_coverages:
-        print(f'Warning: no coverage entries found for {prefix}', file=sys.stderr)
-        continue
-    minimum = min(prefix_coverages)
-    if minimum < threshold:
-        sys.exit(f'Coverage for {prefix} below threshold {threshold}% (found {minimum:.2f}%)')
-PY
-
+          for prefix, threshold in targets:
+              prefix_coverages = [parse_percentage(line) for line in lines if prefix in line]
+              prefix_coverages = [pct for pct in prefix_coverages if pct is not None]
+              if not prefix_coverages:
+                  print(f'Warning: no coverage entries found for {prefix}', file=sys.stderr)
+                  continue
+              minimum = min(prefix_coverages)
+              if minimum < threshold:
+                  sys.exit(f'Coverage for {prefix} below threshold {threshold}% (found {minimum:.2f}%)')
+          PY
