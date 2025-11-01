@@ -1,0 +1,22 @@
+{
+  "patient": "12345",
+  "encounter": "enc-67890",
+  "fhirUser": "https://example.org/Practitioner/practitioner-1",
+  "need_patient_banner": true,
+  "smart_style_url": "https://example.org/style.json",
+  "intent": "order",
+  "tenant": "tenant-alpha",
+  "location": "Location/42",
+  "fhirContext": [
+    {
+      "resourceType": "MedicationRequest",
+      "id": "med-1"
+    },
+    {
+      "resourceType": "Observation",
+      "id": "obs-99"
+    }
+  ],
+  "additional_flag": "true"
+}
+

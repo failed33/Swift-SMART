@@ -318,13 +318,13 @@ class Auth {
 		}
 	}
 
-	private func updatedScope(from originalScope: String?, properties: SMARTAuthProperties)
+	func updatedScope(from originalScope: String?, properties: SMARTAuthProperties)
 		-> String
 	{
 		var components = Set(
 			originalScope?.split(separator: " ").map(String.init).filter { !$0.isEmpty } ?? [])
 		if components.isEmpty {
-			components = ["user/*.cruds", "openid", "profile"]
+			components = ["user/*.cruds", "openid", "fhirUser"]
 		}
 
 		var normalized = Set<String>()
@@ -346,7 +346,7 @@ class Auth {
 		}
 
 		normalized.insert("openid")
-		normalized.insert("profile")
+		normalized.insert("fhirUser")
 
 		switch properties.granularity {
 		case .tokenOnly:

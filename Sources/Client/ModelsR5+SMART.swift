@@ -71,8 +71,8 @@ extension Optional where Wrapped == FHIRPrimitive<FHIRUnsignedInteger> {
 // MARK: - Element Extensions
 
 extension Element {
-    /// Mirrors Swift-FHIR's `extensions(forURI:)` helper.
-    public func extensions(for uri: String) -> [ModelsR5.Extension] {
+    /// Mirrors Swift-FHIR's historic `extensions(forURI:)` helper.
+    public func extensions(forURI uri: String) -> [ModelsR5.Extension] {
         `extension`?.filter { $0.url.value?.url.absoluteString == uri } ?? []
     }
 }

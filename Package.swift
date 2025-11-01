@@ -76,5 +76,22 @@ let package = Package(
                 "Resources"
             ]
         ),
+        .testTarget(
+            name: "SMARTTests",
+            dependencies: [
+                "SMART",
+                "FHIRClient",
+                "HTTPClient",
+                .product(name: "ModelsR5", package: "FHIRModels")
+            ],
+            path: "Tests",
+            exclude: [
+                "strategy",
+                "Info.plist"
+            ],
+            resources: [
+                .process("Fixtures")
+            ]
+        ),
     ]
 )
