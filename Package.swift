@@ -82,6 +82,7 @@ let package = Package(
                 "SMART",
                 "FHIRClient",
                 "HTTPClient",
+                "HTTPClientLive",
                 .product(name: "ModelsR5", package: "FHIRModels")
             ],
             path: "Tests",

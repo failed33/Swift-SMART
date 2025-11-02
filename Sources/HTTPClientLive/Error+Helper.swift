@@ -29,6 +29,9 @@ extension Error {
             return httpClientError
         }
         if let urlError = self as? URLError {
+            if urlError.code == .cancelled {
+                return .httpError(urlError)
+            }
             return .httpError(urlError)
         }
         return .unknown(self)

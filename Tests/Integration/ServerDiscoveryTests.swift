@@ -1,4 +1,5 @@
 @testable import SMART
+import HTTPClient
 import XCTest
 
 final class ServerDiscoveryTests: XCTestCase {
@@ -93,6 +94,37 @@ final class ServerDiscoveryTests: XCTestCase {
         wait(for: [secondFetch], timeout: 2)
 
         XCTAssertEqual(httpClient.requestCount(for: wellKnownURL.path), 2)
+    }
+
+    func testConfigurationErrorsAreWrappedInSMARTClientError() throws {
+        let httpClient = MockHTTPClient()
+        httpClient.shouldFail = true
+        httpClient.failureError = .networkError("offline")
+
+        let baseURL = URL(string: "https://example.org/fhir")!
+        let server = Server(baseURL: baseURL, httpClient: httpClient)
+        let expectation = expectation(description: "Configuration failure is wrapped")
+
+        server.getSMARTConfiguration { result in
+            switch result {
+            case .success:
+                XCTFail("Expected failure, received success")
+            case .failure(let error):
+                guard let smartError = error as? SMARTClientError else {
+                    XCTFail("Expected SMARTClientError, received: \(error)")
+                    return
+                }
+                guard case let .configuration(url, underlying) = smartError else {
+                    XCTFail("Expected SMARTClientError.configuration, received: \(smartError)")
+                    return
+                }
+                XCTAssertEqual(url, SMARTConfiguration.wellKnownURL(for: baseURL))
+                XCTAssertTrue(underlying is HTTPClientError)
+                expectation.fulfill()
+            }
+        }
+
+        waitForExpectations(timeout: 2)
     }
 }
 

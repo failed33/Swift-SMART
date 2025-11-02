@@ -200,6 +200,9 @@ extension Swift.Error {
                 )
             )
         }
+        if self is DecodingError {
+            return .decoding(self)
+        }
         return .unknown(self)
     }
 }

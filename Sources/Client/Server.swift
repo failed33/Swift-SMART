@@ -23,6 +23,7 @@ open class Server {
 	var auth: Auth? {
 		didSet {
 			oauthInterceptor.auth = auth
+			authRefreshInterceptor?.auth = auth
 
 			if let oauth: OAuth2 = auth?.oauth {
 				oauth.onBeforeDynamicClientRegistration = onBeforeDynamicClientRegistration
@@ -74,6 +75,9 @@ open class Server {
 
 	private let receiveQueue: AnySchedulerOf<DispatchQueue>
 	private let oauthInterceptor: OAuth2BearerInterceptor
+	private let authRefreshInterceptor: AuthRefreshInterceptor?
+	private let retryInterceptor: RetryInterceptor?
+	private let retryPolicy: RetryPolicy
 	private let httpClient: HTTPClient
 	private let configurationDecoder: JSONDecoder = {
 		JSONDecoder()
@@ -88,7 +92,8 @@ open class Server {
 		baseURL: URL,
 		auth: OAuth2JSON? = nil,
 		httpClient: HTTPClient? = nil,
-		receiveQueue: AnySchedulerOf<DispatchQueue> = .main
+		receiveQueue: AnySchedulerOf<DispatchQueue> = .main,
+		retryPolicy: RetryPolicy? = nil
 	) {
 		baseURL.assertAbsolute()
 
@@ -97,15 +102,22 @@ open class Server {
 		self.authSettings = auth
 		self.receiveQueue = receiveQueue
 
+		self.retryPolicy = retryPolicy ?? RetryPolicy()
 		self.oauthInterceptor = OAuth2BearerInterceptor(auth: nil)
 
 		if let httpClient {
+			self.authRefreshInterceptor = nil
+			self.retryInterceptor = nil
 			self.httpClient = httpClient
 		} else {
 			let configuration = URLSessionConfiguration.default
+			let authRefresh = AuthRefreshInterceptor(auth: nil)
+			let retry = RetryInterceptor(policy: self.retryPolicy)
+			self.authRefreshInterceptor = authRefresh
+			self.retryInterceptor = retry
 			self.httpClient = DefaultHTTPClient(
 				urlSessionConfiguration: configuration,
-				interceptors: [oauthInterceptor]
+				interceptors: [oauthInterceptor, authRefresh, retry]
 			)
 		}
 
@@ -153,22 +165,29 @@ open class Server {
 				var request = URLRequest(url: wellKnownURL)
 				request.httpMethod = "GET"
 
-				let response = try await self.httpClient.sendAsync(
-					request: request, interceptors: [])
+				do {
+					let response = try await self.httpClient.sendAsync(
+						request: request, interceptors: [])
 
-				guard (200..<300).contains(response.status.rawValue) else {
-					throw SMARTConfigurationError.invalidHTTPStatus(response.status.rawValue)
+					guard (200..<300).contains(response.status.rawValue) else {
+						throw SMARTClientError.configuration(
+							url: wellKnownURL,
+							underlying: SMARTConfigurationError.invalidHTTPStatus(response.status.rawValue)
+						)
+					}
+
+					let configuration = try self.configurationDecoder.decode(
+						SMARTConfiguration.self, from: response.data)
+
+					self.configurationQueue.sync {
+						self.cachedSMARTConfiguration = configuration
+						self.configurationTask = nil
+					}
+
+					return configuration
+				} catch {
+					throw SMARTClientError.configuration(url: wellKnownURL, underlying: error)
 				}
-
-				let configuration = try self.configurationDecoder.decode(
-					SMARTConfiguration.self, from: response.data)
-
-				self.configurationQueue.sync {
-					self.cachedSMARTConfiguration = configuration
-					self.configurationTask = nil
-				}
-
-				return configuration
 			}
 
 			configurationTask = task
@@ -371,7 +390,9 @@ open class Server {
 						self?.cancellables.remove(cancellable)
 					}
 					if case .failure(let error) = result {
-						completion(.failure(error))
+						let url = URL(string: "Patient/\(id)", relativeTo: self?.baseURL)
+						let mapped = SMARTErrorMapper.mapPublic(error: error, url: url)
+						completion(.failure(mapped))
 					}
 				},
 				receiveValue: { patient in

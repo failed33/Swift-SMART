@@ -256,7 +256,12 @@ open class Client {
 						self?.cancellables.remove(cancellable)
 					}
 					if case .failure(let error) = completionResult {
-						completion(.failure(error))
+						let url = operation.relativeUrlString.flatMap { path -> URL? in
+							guard let self else { return nil }
+							return URL(string: path, relativeTo: self.server.baseURL)
+						}
+						let mapped = SMARTErrorMapper.mapPublic(error: error, url: url)
+						completion(.failure(mapped))
 					}
 				},
 				receiveValue: { response in

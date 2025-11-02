@@ -1,5 +1,6 @@
 @testable import SMART
 import Combine
+import HTTPClient
 import ModelsR5
 import XCTest
 
@@ -79,7 +80,7 @@ final class FHIROperationsTests: XCTestCase {
         XCTAssertEqual(request.httpBody, payload)
     }
 
-    func testHTTPErrorProducesFHIRClientHttpError() throws {
+    func testFetchPatientMapsHTTPErrorToSMARTClientError() throws {
         let httpClient = MockHTTPClient()
         let server = makeServer(using: httpClient)
 
@@ -87,30 +88,29 @@ final class FHIROperationsTests: XCTestCase {
         let requestURL = URL(string: "https://example.org/fhir/Patient/example")!
         httpClient.setResponse(for: requestURL, data: data, statusCode: 401)
 
-        let expectation = expectation(description: "Request fails with HTTP error")
+        let expectation = expectation(description: "Request fails with SMARTClientError.http")
 
-        let operation = DecodingFHIRRequestOperation<ModelsR5.Patient>(path: "Patient/example")
-
-        server.fhirClient.execute(operation: operation)
-            .sink(receiveCompletion: { completion in
-                if case .failure(let error) = completion {
-                    guard case let .http(httpError) = error else {
-                        XCTFail("Expected HTTP error, received: \(error)")
-                        return
-                    }
-                    if case let .httpError(urlError) = httpError.httpClientError {
-                        XCTAssertEqual(urlError.errorCode, 401)
-                    }
-                    XCTAssertEqual(
-                        httpError.operationOutcome?.issue.first?.diagnostics?.string,
-                        "Access token is invalid"
-                    )
-                    expectation.fulfill()
+        server.fetchPatient(id: "example") { result in
+            switch result {
+            case .success:
+                XCTFail("Expected failure, received success")
+            case .failure(let error):
+                guard let smartError = error as? SMARTClientError else {
+                    XCTFail("Expected SMARTClientError, received: \(error)")
+                    return
                 }
-            }, receiveValue: { _ in
-                XCTFail("Expected failure, received value")
-            })
-            .store(in: &cancellables)
+                guard case let .http(status, url, headers, outcome, underlying) = smartError else {
+                    XCTFail("Expected SMARTClientError.http, received: \(smartError)")
+                    return
+                }
+                XCTAssertEqual(status, 401)
+                XCTAssertEqual(url, requestURL)
+                XCTAssertFalse(headers.isEmpty)
+                XCTAssertEqual(outcome?.issue.first?.diagnostics?.string, "Access token is invalid")
+                XCTAssertTrue(underlying is HTTPClientError)
+                expectation.fulfill()
+            }
+        }
 
         waitForExpectations(timeout: 2)
         XCTAssertEqual(httpClient.requestCount(for: requestURL.path), 1)

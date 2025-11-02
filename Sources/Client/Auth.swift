@@ -262,8 +262,11 @@ class Auth {
 		do {
 			try oauth.handleRedirectURL(redirect)
 			return true
-		} catch {}
-		return false
+		} catch {
+			server.logger?.warn("SMART", msg: "OAuth redirect failed: \(error)")
+			authDidFail(withError: error)
+			return false
+		}
 	}
 
 	internal func authDidSucceed(withParameters parameters: OAuth2JSON) {
