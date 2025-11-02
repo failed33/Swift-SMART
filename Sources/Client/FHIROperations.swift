@@ -85,6 +85,20 @@ struct DecodingFHIRRequestOperation<Decoded: Decodable>: FHIRClientOperation {
     }
 
     func handle(response: FHIRClient.Response) throws -> Decoded {
-        try decoder.decode(Decoded.self, from: response.body)
+        do {
+            return try decoder.decode(Decoded.self, from: response.body)
+        } catch {
+            let snippet = String(decoding: response.body.prefix(512), as: UTF8.self)
+            let wrappedError = NSError(
+                domain: "DecodingFHIRRequestOperation",
+                code: 0,
+                userInfo: [
+                    NSLocalizedDescriptionKey: error.localizedDescription,
+                    NSUnderlyingErrorKey: error,
+                    "BodySnippet": snippet,
+                ]
+            )
+            throw FHIRClient.Error.decoding(wrappedError)
+        }
     }
 }

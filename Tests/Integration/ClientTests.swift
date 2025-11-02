@@ -14,8 +14,7 @@ final class ClientIntegrationTests: XCTestCase {
         let baseURL = URL(string: "https://api.io")!
         let client = Client(baseURL: baseURL, settings: ["redirect": "oauth://callback"])
 
-        XCTAssertEqual(client.server.baseURL.absoluteString, "https://api.io")
+        XCTAssertEqual(client.server.baseURL.absoluteString, "https://api.io/")
         XCTAssertEqual(client.server.aud, "https://api.io")
     }
 }
-

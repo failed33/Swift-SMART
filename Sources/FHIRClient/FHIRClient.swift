@@ -26,6 +26,8 @@ import Foundation
 import HTTPClient
 import ModelsR5
 
+private typealias ConcurrencyTask = _Concurrency.Task
+
 extension FHIRClient {
     // sourcery: CodedError = "520"
     /// Error cases when using the `FHIRClient`
@@ -45,12 +47,12 @@ extension FHIRClient {
 
         public var description: String {
             switch self {
-            case let .internalError(error): return error
+            case .internalError(let error): return error
             case .inconsistentResponse: return "inconsistent response error"
-            case let .decoding(error): return error.localizedDescription
-            case let .unknown(error): return error.localizedDescription
-            case let .http(httpError):
-                guard case let .httpError(urlError) = httpError.httpClientError
+            case .decoding(let error): return error.localizedDescription
+            case .unknown(let error): return error.localizedDescription
+            case .http(let httpError):
+                guard case .httpError(let urlError) = httpError.httpClientError
                 else { return httpError.httpClientError.localizedDescription }
                 var message = "urlError: \(urlError.localizedDescription)"
                 if let issue = httpError.operationOutcome?.issue.first {
@@ -62,12 +64,12 @@ extension FHIRClient {
 
         public var errorDescription: String? {
             switch self {
-            case let .internalError(error): return error
+            case .internalError(let error): return error
             case .inconsistentResponse: return "inconsistent response error"
-            case let .decoding(error): return error.localizedDescription
-            case let .unknown(error): return error.localizedDescription
-            case let .http(httpError):
-                guard case let .httpError(urlError) = httpError.httpClientError
+            case .decoding(let error): return error.localizedDescription
+            case .unknown(let error): return error.localizedDescription
+            case .http(let httpError):
+                guard case .httpError(let urlError) = httpError.httpClientError
                 else { return httpError.httpClientError.localizedDescription }
                 var message = "urlError: \(urlError.localizedDescription)"
                 if let issue = httpError.operationOutcome?.issue.first {
@@ -77,10 +79,11 @@ extension FHIRClient {
             }
         }
 
-        public static func ==(lhs: FHIRClient.Error, rhs: FHIRClient.Error) -> Bool {
+        public static func == (lhs: FHIRClient.Error, rhs: FHIRClient.Error) -> Bool {
             switch (lhs, rhs) {
-            case let (internalError(lhsString), internalError(rhsString)): return lhsString == rhsString
-            case let (http(lhsError), http(rhsError)):
+            case (internalError(let lhsString), internalError(let rhsString)):
+                return lhsString == rhsString
+            case (http(let lhsError), http(let rhsError)):
                 return lhsError.httpClientError == rhsError.httpClientError
             case (inconsistentResponse, inconsistentResponse): return true
             default: return false
@@ -100,7 +103,9 @@ public class FHIRClient {
     /// - Parameters:
     ///   - server: `URL` where the request will be sent to
     ///   - httpClient:  `HTTPClient` that will (alter and) perform the request resulting from a `FHIRClientOperation`
-    public init(server: URL, httpClient: HTTPClient, receiveQueue: AnySchedulerOf<DispatchQueue> = .main) {
+    public init(
+        server: URL, httpClient: HTTPClient, receiveQueue: AnySchedulerOf<DispatchQueue> = .main
+    ) {
         self.server = server
         self.httpClient = httpClient
         self.receiveQueue = receiveQueue
@@ -109,41 +114,75 @@ public class FHIRClient {
     /// Perform a request derived from a `FHIRClientOperation`.
     ///
     /// - Parameter operation: The request to be performed will be derived from this `FHIRClientOperation`.
-    /// - Returns: `AnyPublisher` that emits a `FHIRClient.Response`
-    public func execute<F: FHIRClientOperation>(operation: F) -> AnyPublisher<F.Value, FHIRClient.Error> {
+    /// - Returns: The decoded response value
+    public func execute<F: FHIRClientOperation>(operation: F) async throws -> F.Value {
         guard let relativeURlString = operation.relativeUrlString,
-              let targetUrl = URL(string: relativeURlString, relativeTo: server) else {
-            return Fail(error: .internalError("Operation endpoint url could not be constructed")).eraseToAnyPublisher()
+            let targetUrl = URL(string: relativeURlString, relativeTo: server)
+        else {
+            throw Error.internalError("Operation endpoint url could not be constructed")
         }
+
         var request = URLRequest(url: targetUrl)
         request.allHTTPHeaderFields = operation.httpHeaders
         request.httpMethod = operation.httpMethod.rawValue
         if let bodyData = operation.httpBody {
             request.httpBody = bodyData
         }
-        return httpClient.sendPublisher(request: request)
-            .receive(on: receiveQueue)
-            .tryMap { data, urlResponse, status in
-                let response = FHIRClient.Response.from(response: urlResponse, status: status, data: data)
 
-                guard response.status.isSuccessful else {
-                    let urlError = URLError(
-                        URLError.Code(rawValue: response.status.rawValue),
-                        userInfo: ["body": response.body]
-                    )
-                    let outcome = try? JSONDecoder().decode(ModelsR5.OperationOutcome.self, from: response.body)
+        do {
+            let (data, urlResponse, status) = try await httpClient.sendAsync(request: request)
+            let response = FHIRClient.Response.from(
+                response: urlResponse,
+                status: status,
+                data: data
+            )
 
-                    throw Error.http(
-                        FHIRClientHttpError(httpClientError: .httpError(urlError), operationOutcome: outcome)
+            guard response.status.isSuccessful else {
+                let urlError = URLError(
+                    URLError.Code(rawValue: response.status.rawValue),
+                    userInfo: ["body": response.body]
+                )
+                let outcome = try? JSONDecoder().decode(
+                    ModelsR5.OperationOutcome.self,
+                    from: response.body
+                )
+
+                throw Error.http(
+                    FHIRClientHttpError(
+                        httpClientError: .httpError(urlError),
+                        operationOutcome: outcome
                     )
+                )
+            }
+
+            return try operation.handle(response: response)
+        } catch {
+            throw error.asFHIRClientError()
+        }
+    }
+
+    /// Perform a request derived from a `FHIRClientOperation`.
+    ///
+    /// - Parameter operation: The request to be performed will be derived from this `FHIRClientOperation`.
+    /// - Returns: `AnyPublisher` that emits a `FHIRClient.Response`
+    @available(*, deprecated, message: "Use async version instead")
+    public func execute<F: FHIRClientOperation>(operation: F) -> AnyPublisher<
+        F.Value, FHIRClient.Error
+    > {
+        Deferred {
+            Future { promise in
+                ConcurrencyTask {
+                    do {
+                        let value = try await self.execute(operation: operation)
+                        promise(.success(value))
+                    } catch {
+                        promise(.failure(error.asFHIRClientError()))
+                    }
                 }
-
-                return try operation.handle(response: response)
             }
-            .mapError { error in
-                error.asFHIRClientError()
-            }
-            .eraseToAnyPublisher()
+        }
+        .receive(on: receiveQueue)
+        .eraseToAnyPublisher()
     }
 }
 
@@ -153,8 +192,10 @@ extension FHIRClient {
         private let handler: (FHIRClient.Response) throws -> Value
         public var acceptFormat: FHIRAcceptFormat
 
-        public init(acceptFormat: FHIRAcceptFormat = .fhirJson,
-                    _ handler: @escaping (FHIRClient.Response) throws -> Value) {
+        public init(
+            acceptFormat: FHIRAcceptFormat = .fhirJson,
+            _ handler: @escaping (FHIRClient.Response) throws -> Value
+        ) {
             self.handler = handler
             self.acceptFormat = acceptFormat
         }

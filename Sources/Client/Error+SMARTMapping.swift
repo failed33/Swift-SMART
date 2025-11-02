@@ -1,5 +1,5 @@
-import Foundation
 import FHIRClient
+import Foundation
 import HTTPClient
 import ModelsR5
 import OAuth2
@@ -8,10 +8,13 @@ extension Error {
     var isCancellation: Bool {
         if self is CancellationError { return true }
         if let urlError = self as? URLError, urlError.code == .cancelled { return true }
-        if let oauthError = self as? OAuth2Error, case .requestCancelled = oauthError { return true }
+        if let oauthError = self as? OAuth2Error, case .requestCancelled = oauthError {
+            return true
+        }
         if let httpError = self as? HTTPClientError,
-           case let .httpError(urlError) = httpError,
-           urlError.code == .cancelled {
+            case .httpError(let urlError) = httpError,
+            urlError.code == .cancelled
+        {
             return true
         }
         return false
@@ -78,10 +81,12 @@ enum SMARTErrorMapper {
                 underlying: httpError.httpClientError
             )
         case .decoding(let underlying):
+            let snippetFromData = data.flatMap(bodySnippet)
+            let snippetFromError = (underlying as NSError?)?.userInfo["BodySnippet"] as? String
             return .decoding(
                 url: url ?? response?.url,
                 underlying: underlying,
-                bodySnippet: data.flatMap(bodySnippet)
+                bodySnippet: snippetFromData ?? snippetFromError
             )
         case .internalError(let message):
             let underlying = NSError(
@@ -121,15 +126,17 @@ enum SMARTErrorMapper {
                 underlying: underlying
             )
         case .internalError,
-             .networkError,
-             .authentication,
-             .vauError,
-             .unknown:
+            .networkError,
+            .authentication,
+            .vauError,
+            .unknown:
             return .network(underlying: error)
         }
     }
 
-    private static func mapOAuth2Error(_ error: OAuth2Error, tokenEndpoint: URL?) -> SMARTClientError {
+    private static func mapOAuth2Error(_ error: OAuth2Error, tokenEndpoint: URL?)
+        -> SMARTClientError
+    {
         if case .requestCancelled = error {
             return .cancelled
         }
@@ -137,7 +144,7 @@ enum SMARTErrorMapper {
     }
 
     private static func statusCode(from error: HTTPClientError) -> Int {
-        if case let .httpError(urlError) = error {
+        if case .httpError(let urlError) = error {
             return urlError.errorCode
         }
         return -1
@@ -152,4 +159,3 @@ enum SMARTErrorMapper {
         return snippet
     }
 }
-

@@ -4,8 +4,9 @@ import ModelsR5
 public enum SMARTClientError: Error {
     case configuration(url: URL, underlying: Error)
     case oauth(tokenEndpoint: URL?, underlying: Error)
-    case http(status: Int, url: URL, headers: [String: String],
-              outcome: ModelsR5.OperationOutcome?, underlying: Error)
+    case http(
+        status: Int, url: URL, headers: [String: String],
+        outcome: ModelsR5.OperationOutcome?, underlying: Error)
     case decoding(url: URL?, underlying: Error, bodySnippet: String?)
     case cancelled
     case rateLimited(retryAfter: Date?, url: URL)
@@ -17,12 +18,14 @@ extension SMARTClientError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .configuration(let url, let underlying):
-            return "Configuration error for \(url.absoluteString): \(underlying.localizedDescription)"
+            return
+                "Configuration error for \(url.absoluteString): \(underlying.localizedDescription)"
         case .oauth(_, let underlying):
             return underlying.localizedDescription
         case .http(let status, let url, _, let outcome, let underlying):
             if let issue = outcome?.issue.first,
-               let issueText = issue.diagnostics?.string ?? issue.details?.text?.value?.string {
+                let issueText = issue.diagnostics?.string ?? issue.details?.text?.value?.string
+            {
                 return "HTTP \(status) for \(url.absoluteString): \(issueText)"
             }
             return "HTTP \(status) for \(url.absoluteString): \(underlying.localizedDescription)"
@@ -84,7 +87,8 @@ extension SMARTClientError: CustomNSError {
             userInfo[NSURLErrorKey] = url
             userInfo["HTTPHeaders"] = headers
             if let outcome,
-               let outcomeData = try? JSONEncoder().encode(outcome) {
+                let outcomeData = try? JSONEncoder().encode(outcome)
+            {
                 userInfo["OperationOutcome"] = outcomeData
             }
             userInfo[NSUnderlyingErrorKey] = underlying
@@ -110,4 +114,3 @@ extension SMARTClientError: CustomNSError {
         return userInfo
     }
 }
-

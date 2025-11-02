@@ -6,14 +6,15 @@
 //  2014, SMART Health IT.
 //
 
-@testable import SMART
 import XCTest
+
+@testable import SMART
 
 final class ServerIntegrationTests: XCTestCase {
     func testServerInitializationNormalizesAudience() {
         let server = Server(baseURL: URL(string: "https://api.io")!)
 
-        XCTAssertEqual(server.baseURL.absoluteString, "https://api.io")
+        XCTAssertEqual(server.baseURL.absoluteString, "https://api.io/")
         XCTAssertEqual(server.aud, "https://api.io")
     }
 
@@ -26,4 +27,3 @@ final class ServerIntegrationTests: XCTestCase {
         XCTAssertEqual(dictionary["resourceType"] as? String, "CapabilityStatement")
     }
 }
-

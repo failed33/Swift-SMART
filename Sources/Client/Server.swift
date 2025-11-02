@@ -93,12 +93,14 @@ open class Server {
 		auth: OAuth2JSON? = nil,
 		httpClient: HTTPClient? = nil,
 		receiveQueue: AnySchedulerOf<DispatchQueue> = .main,
-		retryPolicy: RetryPolicy? = nil
+		retryPolicy: RetryPolicy? = nil,
+		additionalInterceptors: [Interceptor] = []
 	) {
 		baseURL.assertAbsolute()
 
-		self.baseURL = baseURL
-		self.aud = baseURL.absoluteString
+		let normalizedBase = baseURL.smartEnsuringTrailingSlash()
+		self.baseURL = normalizedBase
+		self.aud = baseURL.smartRemovingTrailingSlash()
 		self.authSettings = auth
 		self.receiveQueue = receiveQueue
 
@@ -115,14 +117,16 @@ open class Server {
 			let retry = RetryInterceptor(policy: self.retryPolicy)
 			self.authRefreshInterceptor = authRefresh
 			self.retryInterceptor = retry
+			var composedInterceptors: [Interceptor] = [oauthInterceptor, authRefresh, retry]
+			composedInterceptors.append(contentsOf: additionalInterceptors)
 			self.httpClient = DefaultHTTPClient(
 				urlSessionConfiguration: configuration,
-				interceptors: [oauthInterceptor, authRefresh, retry]
+				interceptors: composedInterceptors
 			)
 		}
 
 		self.fhirClient = FHIRClient(
-			server: baseURL,
+			server: normalizedBase,
 			httpClient: self.httpClient,
 			receiveQueue: receiveQueue
 		)
@@ -172,12 +176,14 @@ open class Server {
 					guard (200..<300).contains(response.status.rawValue) else {
 						throw SMARTClientError.configuration(
 							url: wellKnownURL,
-							underlying: SMARTConfigurationError.invalidHTTPStatus(response.status.rawValue)
+							underlying: SMARTConfigurationError.invalidHTTPStatus(
+								response.status.rawValue)
 						)
 					}
 
-					let configuration = try self.configurationDecoder.decode(
+					let rawConfiguration = try self.configurationDecoder.decode(
 						SMARTConfiguration.self, from: response.data)
+					let configuration = self.rewriteSMARTConfigurationIfNeeded(rawConfiguration)
 
 					self.configurationQueue.sync {
 						self.cachedSMARTConfiguration = configuration
@@ -195,14 +201,48 @@ open class Server {
 		}
 	}
 
+	private func rewriteSMARTConfigurationIfNeeded(_ configuration: SMARTConfiguration)
+		-> SMARTConfiguration
+	{
+		let rewrittenAuthorize = rewriteOAuthEndpointIfNeeded(configuration.authorizationEndpoint)
+		let rewrittenToken = rewriteOAuthEndpointIfNeeded(configuration.tokenEndpoint)
+		let rewrittenRegistration = configuration.registrationEndpoint.map {
+			rewriteOAuthEndpointIfNeeded($0)
+		}
+
+		if rewrittenAuthorize == configuration.authorizationEndpoint,
+			rewrittenToken == configuration.tokenEndpoint,
+			rewrittenRegistration == configuration.registrationEndpoint
+		{
+			return configuration
+		}
+
+		return SMARTConfiguration(
+			authorizationEndpoint: rewrittenAuthorize,
+			tokenEndpoint: rewrittenToken,
+			registrationEndpoint: rewrittenRegistration,
+			managementEndpoint: configuration.managementEndpoint,
+			introspectionEndpoint: configuration.introspectionEndpoint,
+			revocationEndpoint: configuration.revocationEndpoint,
+			jwksEndpoint: configuration.jwksEndpoint,
+			issuer: configuration.issuer,
+			grantTypesSupported: configuration.grantTypesSupported,
+			responseTypesSupported: configuration.responseTypesSupported,
+			scopesSupported: configuration.scopesSupported,
+			codeChallengeMethodsSupported: configuration.codeChallengeMethodsSupported,
+			tokenEndpointAuthMethodsSupported: configuration.tokenEndpointAuthMethodsSupported,
+			tokenEndpointAuthSigningAlgValuesSupported: configuration
+				.tokenEndpointAuthSigningAlgValuesSupported,
+			capabilities: configuration.capabilities,
+			smartVersion: configuration.smartVersion,
+			fhirVersion: configuration.fhirVersion,
+			additionalFields: configuration.additionalFields
+		)
+	}
+
 	// MARK: - Readiness
 
 	open func ready(callback: @escaping (Error?) -> Void) {
-		if auth != nil {
-			callback(nil)
-			return
-		}
-
 		getSMARTConfiguration { [weak self] result in
 			guard let self else {
 				callback(SMARTError.configuration("Server deallocated"))
@@ -211,6 +251,12 @@ open class Server {
 
 			switch result {
 			case .success(let configuration):
+				do {
+					try self.ensurePKCES256Support(in: configuration)
+				} catch {
+					callback(error)
+					return
+				}
 				self.mergeAuthSettings(with: configuration)
 
 				if self.auth != nil || self.instantiateAuthFromAuthSettings() {
@@ -227,25 +273,69 @@ open class Server {
 		}
 	}
 
+	private func ensurePKCES256Support(in configuration: SMARTConfiguration) throws {
+		guard let methods = configuration.codeChallengeMethodsSupported,
+			methods.contains(where: { $0.caseInsensitiveCompare("S256") == .orderedSame })
+		else {
+			throw SMARTError.configuration(
+				"SMART configuration at \(baseURL.absoluteString) does not advertise PKCE S256 support"
+			)
+		}
+	}
+
 	private func mergeAuthSettings(with configuration: SMARTConfiguration) {
 		var settings = authSettings ?? OAuth2JSON()
 
 		if settings["authorize_uri"] == nil {
-			settings["authorize_uri"] = configuration.authorizationEndpoint.absoluteString
+			let endpoint = rewriteOAuthEndpointIfNeeded(configuration.authorizationEndpoint)
+			settings["authorize_uri"] = endpoint.absoluteString
 		}
 		if settings["token_uri"] == nil {
-			settings["token_uri"] = configuration.tokenEndpoint.absoluteString
+			let endpoint = rewriteOAuthEndpointIfNeeded(configuration.tokenEndpoint)
+			settings["token_uri"] = endpoint.absoluteString
 		}
 		if settings["registration_uri"] == nil,
 			let registration = configuration.registrationEndpoint
 		{
-			settings["registration_uri"] = registration.absoluteString
+			let endpoint = rewriteOAuthEndpointIfNeeded(registration)
+			settings["registration_uri"] = endpoint.absoluteString
 		}
 		if settings["aud"] == nil {
 			settings["aud"] = aud
 		}
 
 		authSettings = settings
+	}
+
+	/// When running tests against servers that advertise HTTP OAuth endpoints, allow remapping
+	/// those endpoints to an HTTPS proxy base via the `SMART_HTTPS_AUTH_BASE` environment variable.
+	/// This enables local TLS termination without changing the underlying FHIR base URL.
+	private func rewriteOAuthEndpointIfNeeded(_ url: URL) -> URL {
+		guard url.scheme?.lowercased() == "http",
+			let baseString = ProcessInfo.processInfo.environment["SMART_HTTPS_AUTH_BASE"],
+			let base = URL(string: baseString),
+			var urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false),
+			let baseComponents = URLComponents(url: base, resolvingAgainstBaseURL: false)
+		else {
+			return url
+		}
+
+		urlComponents.scheme = baseComponents.scheme
+		urlComponents.host = baseComponents.host
+		urlComponents.port = baseComponents.port
+
+		let basePath = (baseComponents.path as NSString).standardizingPath
+		let urlPath = (urlComponents.path as NSString).standardizingPath
+		let combinedPath: String
+		if basePath.isEmpty || basePath == "/" {
+			combinedPath = urlPath
+		} else {
+			let trimmedBase = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
+			combinedPath = trimmedBase + (urlPath.hasPrefix("/") ? urlPath : "/" + urlPath)
+		}
+		urlComponents.path = combinedPath
+
+		return urlComponents.url ?? url
 	}
 
 	private func didSetAuthSettings() {
@@ -402,6 +492,28 @@ open class Server {
 		if let cancellable {
 			cancellables.insert(cancellable)
 		}
+	}
+}
+
+// MARK: - URL Normalization Helpers
+
+extension URL {
+	/// Returns a URL guaranteed to end with a trailing slash so Foundation treats it as a directory
+	/// base when resolving relative paths.
+	fileprivate func smartEnsuringTrailingSlash() -> URL {
+		guard !absoluteString.hasSuffix("/") else { return self }
+		// appending an empty path component marked as a directory preserves existing query/fragment.
+		return appendingPathComponent("", isDirectory: true)
+	}
+
+	/// Returns the absolute string without an optional trailing slash, keeping other components
+	/// (scheme, host, query, fragment) untouched.
+	fileprivate func smartRemovingTrailingSlash() -> String {
+		var absolute = absoluteString
+		if absolute.count > 1, absolute.hasSuffix("/") {
+			absolute.removeLast()
+		}
+		return absolute
 	}
 }
 
