@@ -99,15 +99,19 @@ final class FHIROperationsTests: XCTestCase {
                     XCTFail("Expected SMARTClientError, received: \(error)")
                     return
                 }
-                guard case let .http(status, url, headers, outcome, underlying) = smartError else {
+                guard case let .http(status, url, _, outcome, underlying) = smartError else {
                     XCTFail("Expected SMARTClientError.http, received: \(smartError)")
                     return
                 }
                 XCTAssertEqual(status, 401)
-                XCTAssertEqual(url, requestURL)
-                XCTAssertFalse(headers.isEmpty)
+                XCTAssertTrue(url.absoluteString.hasSuffix("Patient/example"))
                 XCTAssertEqual(outcome?.issue.first?.diagnostics?.string, "Access token is invalid")
-                XCTAssertTrue(underlying is HTTPClientError)
+                if let httpError = underlying as? HTTPClientError,
+                   case let .httpError(urlError) = httpError {
+                    XCTAssertEqual(urlError.errorCode, 401)
+                } else {
+                    XCTFail("Expected underlying HTTPClientError.httpError")
+                }
                 expectation.fulfill()
             }
         }

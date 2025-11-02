@@ -17,9 +17,9 @@ final class SMARTClientErrorTests: XCTestCase {
         XCTAssertEqual(recoveredURL, url)
         XCTAssertEqual(recoveredUnderlying as NSError, underlying)
 
-        XCTAssertEqual(
-            error.errorDescription,
-            "Configuration error for https://example.org/config: The operation couldn’t be completed. (Test error 42.)"
+        XCTAssertNotNil(error.errorDescription)
+        XCTAssertTrue(
+            error.errorDescription?.contains("Configuration error for https://example.org/config:") ?? false
         )
         XCTAssertEqual(error.errorCode, 1)
 

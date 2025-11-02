@@ -5,8 +5,16 @@ import OAuth2
 import XCTest
 
 final class AuthRefreshInterceptorTests: XCTestCase {
+    private var retainedServers: [Server] = []
+
+    override func tearDown() {
+        retainedServers.removeAll()
+        super.tearDown()
+    }
+
     private func makeAuth() -> Auth {
         let server = Server(baseURL: URL(string: "https://example.org")!, httpClient: MockHTTPClient())
+        retainedServers.append(server)
         return Auth(type: .codeGrant, server: server, settings: nil)
     }
 

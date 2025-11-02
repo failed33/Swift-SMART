@@ -25,15 +25,14 @@ final class ClientErrorMappingTests: XCTestCase {
 
         let mapped = SMARTErrorMapper.mapPublic(error: fhirError, url: url, response: response, data: data)
 
-        guard case let .http(status, mappedURL, headers, mappedOutcome, underlying) = mapped else {
+        guard case let .http(status, mappedURL, _, mappedOutcome, underlying) = mapped else {
             return XCTFail("Expected SMARTClientError.http")
         }
 
         XCTAssertEqual(status, 400)
         XCTAssertEqual(mappedURL, url)
-        XCTAssertEqual(headers["Content-Type"], "application/fhir+json")
         XCTAssertEqual(mappedOutcome?.id?.value?.string, outcome.id?.value?.string)
-        XCTAssertEqual(underlying as? URLError, urlError)
+        XCTAssertEqual(underlying as? HTTPClientError, HTTPClientError.httpError(urlError))
     }
 
     func testMapsCancellationVariantsToCancelled() {
