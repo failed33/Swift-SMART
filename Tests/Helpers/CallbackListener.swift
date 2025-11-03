@@ -14,7 +14,7 @@ import Network
 /// redirects to `http://127.0.0.1:<port>/callback?...`. The listener binds only to the loopback
 /// interface, satisfies RFC 8252 requirements, and emits the captured redirect URL for tests to
 /// process.
-final class CallbackListener {
+final class CallbackListener: @unchecked Sendable {
 
     enum ListenerError: Error, LocalizedError {
         case alreadyStarted
@@ -138,9 +138,9 @@ final class CallbackListener {
         }
     }
 
-    /// Waits for the redirect request, returning the captured URL.
+    /// Waits for the redirect request synchronously, returning the captured URL.
     /// - Parameter timeout: Seconds to wait before giving up.
-    func awaitRedirect(timeout: TimeInterval) throws -> URL {
+    private func awaitRedirectSync(timeout: TimeInterval) throws -> URL {
         let waitResult = redirectSemaphore.wait(timeout: .now() + timeout)
         guard waitResult == .success else {
             throw ListenerError.timedOut(timeout)
@@ -151,6 +151,28 @@ final class CallbackListener {
                 throw ListenerError.invalidRequest
             }
             return url
+        }
+    }
+
+    /// Waits for the redirect request, returning the captured URL.
+    /// - Parameter timeout: Seconds to wait before giving up.
+    func awaitRedirect(timeout: TimeInterval) async throws -> URL {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    do {
+                        let url = try self.awaitRedirectSync(timeout: timeout)
+                        continuation.resume(returning: url)
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        } onCancel: {
+            self.queue.async {
+                self.listener?.cancel()
+                self.redirectSemaphore.signal()
+            }
         }
     }
 

@@ -107,6 +107,7 @@ class Auth {
 		}
 
 		// SMART OAuth2 endpoints are exposed via extensions on the security block
+		// TODO: shouldnt this be run against the actual server's capabilities? Meaning the smart-configuration endpoint or .well-known/capability-statement endpoint?
 		if let smartAuthExtensions = security.extensions(
 			for: "http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris"
 		).first?.`extension` {

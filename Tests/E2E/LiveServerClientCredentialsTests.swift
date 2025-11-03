@@ -13,7 +13,7 @@ final class LiveServerClientCredentialsTests: XCTestCase {
         }
     }
 
-    func testClientCredentialsFlowAgainstLiveServer() throws {
+    func testClientCredentialsFlowAgainstLiveServer() async throws {
         let env = ProcessInfo.processInfo.environment
 
         guard let base = env["SMART_BASE_URL"], let baseURL = URL(string: base) else {
@@ -38,53 +38,28 @@ final class LiveServerClientCredentialsTests: XCTestCase {
             ]
         )
 
-        let readyExp = expectation(description: "Server ready")
-        var readyError: Error?
-        client.ready { error in
-            readyError = error
-            readyExp.fulfill()
-        }
-        wait(for: [readyExp], timeout: 15)
-        XCTAssertNil(readyError, "Server readiness failed: \(String(describing: readyError))")
+        try await client.ready()
 
         // Always verify metadata endpoint
-        let metadataExp = expectation(description: "GET metadata")
-        client.getJSON(at: "metadata") { result in
-            switch result {
-            case .success(let response):
-                XCTAssertTrue(response.status.isSuccessful, "metadata status: \(response.status)")
-                if response.status.isSuccessful {
-                    Self.printResponse(prefix: "metadata", data: response.body)
-                }
-                // Basic sanity check on CapabilityStatement
-                if let json = try? JSONSerialization.jsonObject(with: response.body)
-                    as? [String: Any]
-                {
-                    XCTAssertEqual(json["resourceType"] as? String, "CapabilityStatement")
-                }
-                metadataExp.fulfill()
-            case .failure(let error):
-                XCTFail("metadata request failed: \(error)")
-            }
+        let metadataResponse = try await client.getJSON(at: "metadata")
+        XCTAssertTrue(
+            metadataResponse.status.isSuccessful, "metadata status: \(metadataResponse.status)")
+        if metadataResponse.status.isSuccessful {
+            Self.printResponse(prefix: "metadata", data: metadataResponse.body)
         }
-        wait(for: [metadataExp], timeout: 20)
+        if let json = try? JSONSerialization.jsonObject(with: metadataResponse.body)
+            as? [String: Any]
+        {
+            XCTAssertEqual(json["resourceType"] as? String, "CapabilityStatement")
+        }
 
         // Optional protected query if provided (e.g., "Patient?_count=1")
         if let queryPath = env["SMART_TEST_QUERY_PATH"], !queryPath.isEmpty {
-            let queryExp = expectation(description: "GET \(queryPath)")
-            client.getJSON(at: queryPath) { result in
-                switch result {
-                case .success(let response):
-                    XCTAssertTrue(response.status.isSuccessful, "query status: \(response.status)")
-                    if response.status.isSuccessful {
-                        Self.printResponse(prefix: queryPath, data: response.body)
-                    }
-                    queryExp.fulfill()
-                case .failure(let error):
-                    XCTFail("query failed: \(error)")
-                }
+            let response = try await client.getJSON(at: queryPath)
+            XCTAssertTrue(response.status.isSuccessful, "query status: \(response.status)")
+            if response.status.isSuccessful {
+                Self.printResponse(prefix: queryPath, data: response.body)
             }
-            wait(for: [queryExp], timeout: 30)
         }
     }
 }

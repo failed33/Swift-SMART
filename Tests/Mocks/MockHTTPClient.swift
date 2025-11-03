@@ -61,7 +61,7 @@ final class MockHTTPClient: HTTPClient {
         let response = try prepareResponse(for: request)
         if responseDelay > 0 {
             let nanoseconds = UInt64(responseDelay * 1_000_000_000)
-            try await Task.sleep(nanoseconds: nanoseconds)
+            try await _Concurrency.Task.sleep(nanoseconds: nanoseconds)
         }
         return response
     }
@@ -74,7 +74,8 @@ final class MockHTTPClient: HTTPClient {
         statusCode: Int = HTTPStatusCode.ok.rawValue,
         headers: [String: String] = ["Content-Type": "application/json"]
     ) {
-        mockResponses[url.path] = ResponseConfiguration(data: data, statusCode: statusCode, headers: headers)
+        mockResponses[url.path] = ResponseConfiguration(
+            data: data, statusCode: statusCode, headers: headers)
     }
 
     func clearRecordedRequests() {
@@ -108,12 +109,14 @@ final class MockHTTPClient: HTTPClient {
             throw HTTPClientError.networkError("Mock response not configured for \(url.path)")
         }
 
-        guard let httpResponse = HTTPURLResponse(
-            url: url,
-            statusCode: configuration.statusCode,
-            httpVersion: nil,
-            headerFields: configuration.headers
-        ) else {
+        guard
+            let httpResponse = HTTPURLResponse(
+                url: url,
+                statusCode: configuration.statusCode,
+                httpVersion: nil,
+                headerFields: configuration.headers
+            )
+        else {
             throw HTTPClientError.internalError("Failed to build HTTPURLResponse for \(url)")
         }
 
@@ -149,4 +152,3 @@ final class MockHTTPClient: HTTPClient {
         }
     }
 }
-

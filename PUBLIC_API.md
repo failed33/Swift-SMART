@@ -39,7 +39,7 @@ public var awaitingAuthCallback: Bool { get }       // Whether auth is in progre
 ##### **Standalone Launch**
 
 ```swift
-open func authorize(callback: @escaping (_ patient: ModelsR5.Patient?, _ error: Error?) -> Void)
+open func authorize() async throws -> ModelsR5.Patient?
 ```
 
 Initiates authorization flow from outside the EHR. If `launch/patient` scope is included, user will be prompted to select a patient.
@@ -53,15 +53,25 @@ The library automatically:
 **Example:**
 
 ```swift
-client.authorize { patient, error in
-    guard let patient = patient, error == nil else {
-        print("Authorization failed: \(error)")
-        return
+do {
+    let patient = try await client.authorize()
+    if let patient {
+        print("Authorized with patient: \(patient.id ?? "unknown")")
     }
-    print("Authorized with patient: \(patient.id)")
-    // Now access FHIR API via client.server.fhirClient
+} catch {
+    print("Authorization failed: \(error)")
 }
 ```
+
+> The legacy completion-handler version returns a `Task<Void, Never>` for optional cancellation:
+>
+> ```swift
+> @discardableResult
+> @available(*, deprecated, renamed: "authorize()")
+> open func authorize(
+>     callback: @escaping (_ patient: ModelsR5.Patient?, _ error: Error?) -> Void
+> ) -> Task<Void, Never>
+> ```
 
 ##### **EHR Launch**
 
@@ -110,10 +120,18 @@ func application(_ app: UIApplication, open url: URL, options: [UIApplication.Op
 ##### **Server Readiness**
 
 ```swift
-open func ready(callback: @escaping (Error?) -> Void)
+open func ready() async throws
 ```
 
 Ensures the server has fetched `.well-known/smart-configuration` and is ready for authorization.
+
+> Legacy wrapper (deprecated) returns a `Task` so existing code can opt into cancellation:
+>
+> ```swift
+> @discardableResult
+> @available(*, deprecated, renamed: "ready()")
+> open func ready(callback: @escaping (Error?) -> Void) -> Task<Void, Never>
+> ```
 
 ##### **Session Management**
 
@@ -126,22 +144,23 @@ open func forgetClientRegistration()        // Clear client registration
 ##### **FHIR Data Access**
 
 ```swift
-open func getJSON(at path: String, completion: @escaping (Result<FHIRClient.Response, Error>) -> Void)
-open func getData(from url: URL, accept: String, completion: @escaping (Result<FHIRClient.Response, Error>) -> Void)
+open func getJSON(at path: String) async throws -> FHIRClient.Response
+open func getData(from url: URL, accept: String) async throws -> FHIRClient.Response
 ```
 
 **Example:**
 
 ```swift
-client.getJSON(at: "Patient/123") { result in
-    switch result {
-    case .success(let response):
-        let patient = try? JSONDecoder().decode(ModelsR5.Patient.self, from: response.body)
-    case .failure(let error):
-        print("Request failed: \(error)")
-    }
+do {
+    let response = try await client.getJSON(at: "Patient/123")
+    let patient = try JSONDecoder().decode(ModelsR5.Patient.self, from: response.body)
+    print("Loaded patient: \(patient.id?.value?.string ?? "unknown")")
+} catch {
+    print("Request failed: \(error)")
 }
 ```
+
+> Callback wrappers remain available (deprecated) and return `Task<Void, Never>` for optional cancellation.
 
 ---
 
@@ -168,35 +187,44 @@ public var onBeforeDynamicClientRegistration: ((URL) -> OAuth2DynReg)?
 ##### **Discovery**
 
 ```swift
-open func getSMARTConfiguration(
-    forceRefresh: Bool = false,
-    completion: @escaping (Result<SMARTConfiguration, Error>) -> Void
-)
+open func getSMARTConfiguration(forceRefresh: Bool = false) async throws -> SMARTConfiguration
 ```
 
 Fetches and caches `.well-known/smart-configuration`.
 `Server.ready` will fail early if the configuration omits `code_challenge_methods_supported = ["S256"]`, matching SMART App Launch requirements.
 
+> Deprecated completion-handler wrapper returns `Task<Void, Never>` for backwards compatibility.
+
 ##### **Patient Fetch**
 
 ```swift
-func fetchPatient(id: String, completion: @escaping (Result<ModelsR5.Patient, Error>) -> Void)
+public func readPatient(id: String) async throws -> ModelsR5.Patient
+public func read<T: ModelsR5.Resource>(_ type: T.Type, id: String) async throws -> T
 ```
 
-Convenience method to read a Patient resource by ID.
+Convenience methods to read resources by logical ID using FHIR REST `GET`.
 
 **Example:**
 
 ```swift
-server.fetchPatient(id: "123") { result in
-    switch result {
-    case .success(let patient):
-        print("Patient name: \(patient.displayNameFamilyGiven)")
-    case .failure(let error):
-        print("Fetch failed: \(error)")
-    }
+do {
+    let patient = try await server.readPatient(id: "123")
+    print("Patient name: \(patient.displayNameFamilyGiven)")
+} catch {
+    print("Fetch failed: \(error)")
 }
 ```
+
+> Deprecated completion-wrapper:
+>
+> ```swift
+> @discardableResult
+> @available(*, deprecated, renamed: "readPatient(id:)")
+> func fetchPatient(
+>     id: String,
+>     completion: @escaping (Result<ModelsR5.Patient, Error>) -> Void
+> ) -> Task<Void, Never>
+> ```
 
 ##### **Direct FHIRClient Access**
 
@@ -285,14 +313,12 @@ public struct SMARTConfiguration: Codable {
 **Example:**
 
 ```swift
-server.getSMARTConfiguration { result in
-    switch result {
-    case .success(let config):
-        print("Auth endpoint: \(config.authorizationEndpoint)")
-        print("Capabilities: \(config.capabilities ?? [])")
-    case .failure(let error):
-        print("Discovery failed: \(error)")
-    }
+do {
+    let config = try await server.getSMARTConfiguration()
+    print("Auth endpoint: \(config.authorizationEndpoint)")
+    print("Capabilities: \(config.capabilities ?? [])")
+} catch {
+    print("Discovery failed: \(error)")
 }
 ```
 

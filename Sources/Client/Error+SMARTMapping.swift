@@ -5,19 +5,46 @@ import ModelsR5
 import OAuth2
 
 extension Error {
-    var isCancellation: Bool {
-        if self is CancellationError { return true }
-        if let urlError = self as? URLError, urlError.code == .cancelled { return true }
-        if let oauthError = self as? OAuth2Error, case .requestCancelled = oauthError {
-            return true
+    var cancellationError: CancellationError? {
+        if let cancellation = self as? CancellationError { return cancellation }
+
+        if let urlError = self as? URLError, urlError.code == .cancelled {
+            return CancellationError()
         }
+
+        if let oauthError = self as? OAuth2Error, case .requestCancelled = oauthError {
+            return CancellationError()
+        }
+
         if let httpError = self as? HTTPClientError,
             case .httpError(let urlError) = httpError,
             urlError.code == .cancelled
         {
-            return true
+            return CancellationError()
         }
-        return false
+
+        if let smartError = self as? SMARTClientError {
+            switch smartError {
+            case .cancelled:
+                return CancellationError()
+            case .other(let underlying):
+                return underlying.cancellationError
+            default:
+                break
+            }
+        }
+
+        if let fhirError = self as? FHIRClient.Error {
+            if case .unknown(let underlying) = fhirError {
+                return underlying.cancellationError
+            }
+        }
+
+        return nil
+    }
+
+    var isCancellation: Bool {
+        cancellationError != nil
     }
 }
 

@@ -64,27 +64,21 @@ let smart = Client(
     ]
 )
 
-// authorize, then search for prescriptions
-smart.authorize() { patient, error in
-    if nil != error || nil == patient {
-        // report error
-    }
-    else {
-        MedicationOrder.search(["patient": patient!.id])
-        .perform(smart.server) { bundle, error in
-            if nil != error {
-                // report error
-            }
-            else {
-                var meds = bundle?.entry?
-                    .filter() { return $0.resource is MedicationOrder }
-                    .map() { return $0.resource as! MedicationOrder }
-
-                // now `meds` holds all the patient's orders (or is nil)
-            }
+Task {
+    do {
+        guard let patient = try await smart.authorize() else {
+            print("Authorization cancelled")
+            return
         }
+
+        let response = try await smart.getJSON(at: "MedicationRequest?patient=\(patient.id?.value?.string ?? "")")
+        print("FHIR response status: \(response.status)")
+    } catch {
+        print("Authorization or fetch failed: \(error)")
     }
 }
+
+> Prefer callbacks? The legacy `authorize(callback:)` and `getJSON(..., completion:)` wrappers remain available (deprecated) and now return `Task` handles so you can cancel them.
 ```
 
 For authorization to work with Safari/SFViewController, you also need to:

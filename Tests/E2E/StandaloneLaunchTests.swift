@@ -4,10 +4,11 @@ import XCTest
 
 @testable import SMART
 
+@MainActor
 final class StandaloneLaunchTests: XCTestCase {
 
-    func testStandaloneHappyPathPKCEPatientRead() throws {
-        let context = try prepareStandaloneClient()
+    func testStandaloneHappyPathPKCEPatientRead() async throws {
+        let context = try await prepareStandaloneClient()
         let client = context.client
         let artifacts = context.artifacts
         let callbackListener = context.callback
@@ -15,11 +16,14 @@ final class StandaloneLaunchTests: XCTestCase {
 
         defer { artifacts.emitAttachments() }
 
-        let (authorizedPatient, authorizeError, redirectError) = executeAuthorization(
+        let outcome = await executeAuthorization(
             client: client,
             callbackListener: callbackListener,
             artifacts: artifacts
         )
+        let authorizedPatient = outcome.patient
+        let authorizeError = outcome.authorizeError
+        let redirectError = outcome.redirectError
         XCTAssertNil(
             redirectError, "Redirect handling failed: \(String(describing: redirectError))")
         XCTAssertNil(authorizeError, "Authorization failed: \(String(describing: authorizeError))")
@@ -77,8 +81,8 @@ final class StandaloneLaunchTests: XCTestCase {
         }
     }
 
-    func testStandaloneAuthorizeFailsWithoutAud() throws {
-        let context = try prepareStandaloneClient(transform: { url in
+    func testStandaloneAuthorizeFailsWithoutAud() async throws {
+        let context = try await prepareStandaloneClient(transform: { url in
             self.removingQueryItem(named: "aud", from: url)
         })
         let client = context.client
@@ -86,11 +90,14 @@ final class StandaloneLaunchTests: XCTestCase {
         let callbackListener = context.callback
         defer { artifacts.emitAttachments() }
 
-        let (patient, authorizeError, redirectError) = executeAuthorization(
+        let outcome = await executeAuthorization(
             client: client,
             callbackListener: callbackListener,
             artifacts: artifacts
         )
+        let patient = outcome.patient
+        let authorizeError = outcome.authorizeError
+        let redirectError = outcome.redirectError
 
         XCTAssertNil(patient)
         XCTAssertNil(redirectError, "Expected server to redirect with error payload")
@@ -110,8 +117,8 @@ final class StandaloneLaunchTests: XCTestCase {
         }
     }
 
-    func testStandaloneAuthorizeFailsWithPlainPKCE() throws {
-        let context = try prepareStandaloneClient(transform: { url in
+    func testStandaloneAuthorizeFailsWithPlainPKCE() async throws {
+        let context = try await prepareStandaloneClient(transform: { url in
             self.replacingQueryItem(name: "code_challenge_method", value: "plain", in: url)
         })
         let client = context.client
@@ -119,11 +126,14 @@ final class StandaloneLaunchTests: XCTestCase {
         let callbackListener = context.callback
         defer { artifacts.emitAttachments() }
 
-        let (patient, authorizeError, redirectError) = executeAuthorization(
+        let outcome = await executeAuthorization(
             client: client,
             callbackListener: callbackListener,
             artifacts: artifacts
         )
+        let patient = outcome.patient
+        let authorizeError = outcome.authorizeError
+        let redirectError = outcome.redirectError
 
         XCTAssertNil(patient)
         XCTAssertNil(redirectError, "Expected server to redirect with PKCE error payload")
@@ -145,20 +155,24 @@ final class StandaloneLaunchTests: XCTestCase {
         }
     }
 
-    func testStandaloneStateMismatchDetected() throws {
-        let context = try prepareStandaloneClient()
+    func testStandaloneStateMismatchDetected() async throws {
+        let context = try await prepareStandaloneClient()
         let client = context.client
         let artifacts = context.artifacts
         let callbackListener = context.callback
         defer { artifacts.emitAttachments() }
 
-        let (patient, authorizeError, redirectError) = executeAuthorization(
+        let outcome = await executeAuthorization(
             client: client,
             callbackListener: callbackListener,
             artifacts: artifacts,
             mutateRedirect: { url in self.tamperingState(in: url) },
             expectRedirectHandled: false
         )
+
+        let patient = outcome.patient
+        let authorizeError = outcome.authorizeError
+        let redirectError = outcome.redirectError
 
         XCTAssertNil(patient)
         XCTAssertNil(redirectError)
@@ -172,8 +186,8 @@ final class StandaloneLaunchTests: XCTestCase {
             message.contains("state"), "Error does not mention state mismatch: \(message)")
     }
 
-    func testStandaloneMissingPatientContextHandledGracefully() throws {
-        let context = try prepareStandaloneClient(configureOAuth: { oauth in
+    func testStandaloneMissingPatientContextHandledGracefully() async throws {
+        let context = try await prepareStandaloneClient(configureOAuth: { oauth in
             let originalScope = oauth.scope ?? StandaloneLaunchHelper.defaultScope
             let trimmed =
                 originalScope
@@ -190,11 +204,14 @@ final class StandaloneLaunchTests: XCTestCase {
         let callbackListener = context.callback
         defer { artifacts.emitAttachments() }
 
-        let (patient, authorizeError, redirectError) = executeAuthorization(
+        let outcome = await executeAuthorization(
             client: client,
             callbackListener: callbackListener,
             artifacts: artifacts
         )
+        let patient = outcome.patient
+        let authorizeError = outcome.authorizeError
+        let redirectError = outcome.redirectError
 
         XCTAssertNil(redirectError)
         XCTAssertNil(authorizeError)
@@ -211,18 +228,21 @@ final class StandaloneLaunchTests: XCTestCase {
         }
     }
 
-    func testStandaloneRefreshTokenFlow() throws {
-        let context = try prepareStandaloneClient()
+    func testStandaloneRefreshTokenFlow() async throws {
+        let context = try await prepareStandaloneClient()
         let client = context.client
         let artifacts = context.artifacts
         let callbackListener = context.callback
         defer { artifacts.emitAttachments() }
 
-        let (patient, authorizeError, redirectError) = executeAuthorization(
+        let outcome = await executeAuthorization(
             client: client,
             callbackListener: callbackListener,
             artifacts: artifacts
         )
+        let patient = outcome.patient
+        let authorizeError = outcome.authorizeError
+        let redirectError = outcome.redirectError
 
         XCTAssertNil(redirectError)
         XCTAssertNil(authorizeError)
@@ -244,72 +264,45 @@ final class StandaloneLaunchTests: XCTestCase {
             refreshError = error
             refreshExpectation.fulfill()
         }
-        wait(for: [refreshExpectation], timeout: 30)
+        await fulfillment(of: [refreshExpectation], timeout: 30)
         XCTAssertNil(
             refreshError, "Refresh token exchange failed: \(String(describing: refreshError))")
         XCTAssertNotEqual(oauth.clientConfig.accessToken, initialAccessToken)
 
-        let fetchExpectation = expectation(description: "Patient fetch after refresh")
-        client.server.fetchPatient(id: launchPatient) { result in
-            switch result {
-            case .success(let refreshedPatient):
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-                if let data = try? encoder.encode(refreshedPatient) {
-                    artifacts.recordPatientData(data)
-                }
-                fetchExpectation.fulfill()
-            case .failure(let error):
-                XCTFail("Patient fetch after refresh failed: \(error)")
-            }
+        let refreshedPatient = try await client.server.readPatient(id: launchPatient)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        if let data = try? encoder.encode(refreshedPatient) {
+            artifacts.recordPatientData(data)
         }
-        wait(for: [fetchExpectation], timeout: 30)
 
         if let patient {
             XCTAssertEqual(patient.id?.value?.string, launchPatient)
+            XCTAssertEqual(refreshedPatient.id?.value?.string, launchPatient)
         }
     }
 
-    func testStandaloneDiscoveryCacheRespectsForceRefresh() throws {
-        let context = try prepareStandaloneClient()
+    func testStandaloneDiscoveryCacheRespectsForceRefresh() async throws {
+        let context = try await prepareStandaloneClient()
         let client = context.client
         let artifacts = context.artifacts
         defer { artifacts.emitAttachments() }
 
-        let cacheExpectation = expectation(description: "Discovery cached")
-        client.server.getSMARTConfiguration(forceRefresh: false) { result in
-            switch result {
-            case .success(let configuration):
-                if let recorded = artifacts.configuration {
-                    XCTAssertEqual(
-                        configuration.authorizationEndpoint, recorded.authorizationEndpoint)
-                    XCTAssertEqual(configuration.tokenEndpoint, recorded.tokenEndpoint)
-                }
-                cacheExpectation.fulfill()
-            case .failure(let error):
-                XCTFail("Cached discovery failed: \(error)")
-            }
+        let configuration = try await client.server.getSMARTConfiguration(forceRefresh: false)
+        if let recorded = artifacts.configuration {
+            XCTAssertEqual(configuration.authorizationEndpoint, recorded.authorizationEndpoint)
+            XCTAssertEqual(configuration.tokenEndpoint, recorded.tokenEndpoint)
         }
-        wait(for: [cacheExpectation], timeout: 10)
 
-        let refreshExpectation = expectation(description: "Discovery force refresh")
-        client.server.getSMARTConfiguration(forceRefresh: true) { result in
-            switch result {
-            case .success(let refreshed):
-                if let recorded = artifacts.configuration {
-                    XCTAssertEqual(refreshed.authorizationEndpoint, recorded.authorizationEndpoint)
-                    XCTAssertEqual(refreshed.tokenEndpoint, recorded.tokenEndpoint)
-                }
-                refreshExpectation.fulfill()
-            case .failure(let error):
-                XCTFail("Force refresh failed: \(error)")
-            }
+        let refreshed = try await client.server.getSMARTConfiguration(forceRefresh: true)
+        if let recorded = artifacts.configuration {
+            XCTAssertEqual(refreshed.authorizationEndpoint, recorded.authorizationEndpoint)
+            XCTAssertEqual(refreshed.tokenEndpoint, recorded.tokenEndpoint)
         }
-        wait(for: [refreshExpectation], timeout: 10)
     }
 
-    func testStandaloneRejectsMismatchedRedirect() throws {
-        let context = try prepareStandaloneClient(transform: { url in
+    func testStandaloneRejectsMismatchedRedirect() async throws {
+        let context = try await prepareStandaloneClient(transform: { url in
             self.bumpRedirectPort(in: url)
         })
         let client = context.client
@@ -317,28 +310,19 @@ final class StandaloneLaunchTests: XCTestCase {
         let callbackListener = context.callback
         defer { artifacts.emitAttachments() }
 
-        let authorizeExpectation = expectation(description: "Authorization callback after abort")
-        var authorizeError: Error?
-        client.authorize { _, error in
-            authorizeError = error
-            authorizeExpectation.fulfill()
+        let outcome = await executeAuthorization(
+            client: client,
+            callbackListener: callbackListener,
+            artifacts: artifacts,
+            redirectTimeout: 30
+        )
+
+        XCTAssertNil(outcome.patient)
+        guard let redirectError = outcome.redirectError else {
+            XCTFail("Expected redirect listener to time out for mismatched redirect")
+            return
         }
 
-        let timeoutExpectation = expectation(description: "Loopback redirect timeout")
-        var redirectError: Error?
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                _ = try callbackListener.awaitRedirect(timeout: 30)
-                timeoutExpectation.fulfill()
-            } catch {
-                redirectError = error
-                timeoutExpectation.fulfill()
-            }
-        }
-
-        wait(for: [timeoutExpectation], timeout: 35)
-        XCTAssertNotNil(
-            redirectError, "Expected redirect listener to time out for mismatched redirect")
         if let listenerError = redirectError as? CallbackListener.ListenerError {
             switch listenerError {
             case .timedOut:
@@ -348,12 +332,17 @@ final class StandaloneLaunchTests: XCTestCase {
             }
         }
 
-        client.abort()
-        wait(for: [authorizeExpectation], timeout: 10)
-        XCTAssertNil(authorizeError)
+        if let authorizeError = outcome.authorizeError {
+            XCTAssertTrue(authorizeError is CancellationError)
+        }
     }
 
-    @discardableResult
+    private struct AuthorizationOutcome {
+        let patient: ModelsR5.Patient?
+        let authorizeError: Error?
+        let redirectError: Error?
+    }
+
     private func executeAuthorization(
         client: Client,
         callbackListener: CallbackListener,
@@ -361,43 +350,52 @@ final class StandaloneLaunchTests: XCTestCase {
         redirectTimeout: TimeInterval = 90,
         mutateRedirect: ((URL) -> URL)? = nil,
         expectRedirectHandled: Bool = true
-    ) -> (ModelsR5.Patient?, Error?, Error?) {
-        let authorizeExpectation = expectation(description: "Authorization completes")
-        var authorizeError: Error?
-        var authorizedPatient: ModelsR5.Patient?
-        client.authorize { patient, error in
-            authorizeError = error
-            authorizedPatient = patient
-            authorizeExpectation.fulfill()
+    ) async -> AuthorizationOutcome {
+        let authorizeTask = _Concurrency.Task<ModelsR5.Patient?, Error> { @MainActor in
+            try await client.authorize()
         }
 
-        let redirectExpectation = expectation(description: "Loopback redirect received")
         var redirectError: Error?
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let redirectURL = try callbackListener.awaitRedirect(timeout: redirectTimeout)
-                DispatchQueue.main.async {
-                    let finalURL = mutateRedirect?(redirectURL) ?? redirectURL
-                    artifacts.recordRedirectURL(finalURL)
-                    if !client.didRedirect(to: finalURL) && expectRedirectHandled {
-                        redirectError = NSError(
-                            domain: "StandaloneLaunchTests",
-                            code: 1,
-                            userInfo: [
-                                NSLocalizedDescriptionKey: "Client did not accept redirect URL"
-                            ]
-                        )
-                    }
-                    redirectExpectation.fulfill()
-                }
-            } catch {
-                redirectError = error
-                redirectExpectation.fulfill()
-            }
+        var capturedRedirect: URL?
+
+        do {
+            capturedRedirect = try await callbackListener.awaitRedirect(timeout: redirectTimeout)
+        } catch {
+            redirectError = error
         }
 
-        wait(for: [redirectExpectation, authorizeExpectation], timeout: redirectTimeout + 60)
-        return (authorizedPatient, authorizeError, redirectError)
+        if let redirectURL = capturedRedirect {
+            let finalURL = mutateRedirect?(redirectURL) ?? redirectURL
+            artifacts.recordRedirectURL(finalURL)
+            let handled = client.didRedirect(to: finalURL)
+            if !handled && expectRedirectHandled {
+                redirectError = NSError(
+                    domain: "StandaloneLaunchTests",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey: "Client did not accept redirect URL"
+                    ]
+                )
+            }
+        } else {
+            client.abort()
+            authorizeTask.cancel()
+        }
+
+        var authorizeError: Error?
+        var patient: ModelsR5.Patient?
+
+        do {
+            patient = try await authorizeTask.value
+        } catch {
+            authorizeError = error
+        }
+
+        return AuthorizationOutcome(
+            patient: patient,
+            authorizeError: authorizeError,
+            redirectError: redirectError
+        )
     }
 
     private func reconstructAuthorizeURL(from client: Client) -> URL? {
@@ -452,7 +450,7 @@ final class StandaloneLaunchTests: XCTestCase {
         transform: ((URL) -> URL)? = nil,
         configureAuthProperties: ((inout SMARTAuthProperties) -> Void)? = nil,
         configureOAuth: ((OAuth2) -> Void)? = nil
-    ) throws -> (
+    ) async throws -> (
         environment: StandaloneLaunchHelper.Environment,
         client: Client,
         artifacts: StandaloneLaunchHelper.Artifacts,
@@ -466,7 +464,7 @@ final class StandaloneLaunchTests: XCTestCase {
         try callbackListener.start()
         let portDeadline = Date().addingTimeInterval(2)
         while callbackListener.port == 0 && Date() < portDeadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            try await _Concurrency.Task.sleep(nanoseconds: 10_000_000)
         }
         guard callbackListener.port != 0 else {
             XCTFail("Callback listener failed to bind to a loopback port")
@@ -493,57 +491,39 @@ final class StandaloneLaunchTests: XCTestCase {
         let logger = StandaloneLaunchHelper.CapturingOAuth2Logger()
         client.server.logger = logger
 
-        let readyExpectation = expectation(description: "Client ready")
-        var capturedAuthorizer: AutomationAuthorizer?
-        client.ready { error in
-            XCTAssertNil(error, "Client readiness failed: \(String(describing: error))")
-            guard let oauth = client.server.auth?.oauth else {
-                XCTFail("OAuth configuration missing after readiness")
-                readyExpectation.fulfill()
-                return
-            }
+        try await client.ready()
 
-            oauth.logger = logger
-            configureOAuth?(oauth)
-            // TODO: For debugging/testing purpous we disable the keychain and saved tokens so we get prompted to the GUI picker every time
-            oauth.useKeychain = false
-            oauth.forgetTokens()
-            let authorizer = AutomationAuthorizer(
-                oauth2: oauth,
-                didOpenURL: { url in
-                    artifacts.recordAuthorizeURL(url)
-                }, transform: transform)
-            oauth.authorizer = authorizer
-            capturedAuthorizer = authorizer
-
-            client.server.getSMARTConfiguration(forceRefresh: false) { result in
-                switch result {
-                case .success(let configuration):
-                    artifacts.recordConfiguration(configuration)
-                    StandaloneLaunchHelper.assertSupportsPKCES256(configuration)
-
-                    let actualAuthorize = oauth.clientConfig.authorizeURL
-                    XCTAssertEqual(
-                        actualAuthorize,
-                        configuration.authorizationEndpoint,
-                        "OAuth authorize URL must match SMART discovery"
-                    )
-                case .failure(let configError):
-                    XCTFail("Failed to fetch cached SMART configuration: \(configError)")
-                }
-                readyExpectation.fulfill()
-            }
-        }
-        wait(for: [readyExpectation], timeout: 20)
-
-        guard let authorizer = capturedAuthorizer else {
-            XCTFail("AutomationAuthorizer was not configured")
+        guard let oauth = client.server.auth?.oauth else {
+            XCTFail("OAuth configuration missing after readiness")
             throw NSError(
                 domain: "StandaloneLaunchTests",
                 code: 0,
-                userInfo: [NSLocalizedDescriptionKey: "AutomationAuthorizer was not configured"]
+                userInfo: [NSLocalizedDescriptionKey: "OAuth configuration missing after readiness"]
             )
         }
+
+        oauth.logger = logger
+        configureOAuth?(oauth)
+        // TODO: For debugging/testing purpous we disable the keychain and saved tokens so we get prompted to the GUI picker every time
+        oauth.useKeychain = false
+        oauth.forgetTokens()
+        let authorizer = AutomationAuthorizer(
+            oauth2: oauth,
+            didOpenURL: { url in
+                artifacts.recordAuthorizeURL(url)
+            }, transform: transform)
+        oauth.authorizer = authorizer
+
+        let configuration = try await client.server.getSMARTConfiguration(forceRefresh: false)
+        artifacts.recordConfiguration(configuration)
+        StandaloneLaunchHelper.assertSupportsPKCES256(configuration)
+
+        let actualAuthorize = oauth.clientConfig.authorizeURL
+        XCTAssertEqual(
+            actualAuthorize,
+            configuration.authorizationEndpoint,
+            "OAuth authorize URL must match SMART discovery"
+        )
 
         return (environment, client, artifacts, callbackListener, authorizer, logger)
     }

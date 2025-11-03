@@ -6,7 +6,6 @@
 //  Copyright (c) 2014 SMART Health IT. All rights reserved.
 //
 
-import Combine
 import FHIRClient
 import Foundation
 
@@ -52,8 +51,6 @@ open class Client {
 
 	/// The server this client connects to.
 	public final let server: Server
-
-	private var cancellables = Set<AnyCancellable>()
 
 	/// Set the authorize type you want, e.g. to use a built in web view for authentication and patient selection.
 	open var authProperties = SMARTAuthProperties()
@@ -104,13 +101,19 @@ open class Client {
 
 	// MARK: - Preparations
 
+	open func ready() async throws {
+		try await server.ready()
+	}
+
 	/**
 	Executes the callback immediately if the server is ready to perform requests. Otherwise performs necessary setup operations and
 	requests, like retrieving the conformance statement.
 	
 	- parameter callback: The callback to call if the server is ready or an error has occurred
 	*/
-	open func ready(callback: @escaping (Error?) -> Void) {
+	@discardableResult
+	@available(*, deprecated, renamed: "ready()")
+	open func ready(callback: @escaping (Error?) -> Void) -> _Concurrency.Task<Void, Never> {
 		server.ready(callback: callback)
 	}
 
@@ -123,9 +126,18 @@ open class Client {
 	- parameter callback: The callback that is called when authorization finishes, with a patient resource (if launch/patient was specified
 	                      or an error
 	*/
-	open func authorize(callback: @escaping (_ patient: Patient?, _ error: Error?) -> Void) {
+	open func authorize() async throws -> Patient? {
 		server.mustAbortAuthorization = false
-		server.authorize(with: self.authProperties, callback: callback)
+		return try await server.authorize(with: authProperties)
+	}
+
+	@discardableResult
+	@available(*, deprecated, renamed: "authorize()")
+	open func authorize(callback: @escaping (_ patient: Patient?, _ error: Error?) -> Void)
+		-> _Concurrency.Task<Void, Never>
+	{
+		server.mustAbortAuthorization = false
+		return server.authorize(with: authProperties, callback: callback)
 	}
 
 	open func handleEHRLaunch(
@@ -212,17 +224,43 @@ open class Client {
 	Request a JSON resource at the given path using the client's `FHIRClient`.
 	
 	- parameter path: The path relative to the server's base URL to request
-	- parameter completion: Completion invoked with the FHIR response or an error.
+	- returns: The raw FHIR response
 	*/
-	open func getJSON(
-		at path: String,
-		completion: @escaping (Result<FHIRClient.Response, Error>) -> Void
-	) {
+	open func getJSON(at path: String) async throws -> FHIRClient.Response {
 		let operation = RawFHIRRequestOperation(
 			path: path,
 			headers: ["Accept": "application/json"]
 		)
-		execute(operation: operation, completion: completion)
+
+		do {
+			return try await server.fhirClient.execute(operation: operation)
+		} catch {
+			if let cancellation = error.cancellationError {
+				throw cancellation
+			}
+			throw mapError(error, forPath: path)
+		}
+	}
+
+	@discardableResult
+	@available(*, deprecated, renamed: "getJSON(at:)")
+	open func getJSON(
+		at path: String,
+		completion: @escaping (Result<FHIRClient.Response, Error>) -> Void
+	) -> _Concurrency.Task<Void, Never> {
+		_Concurrency.Task {
+			do {
+				let response = try await getJSON(at: path)
+				server.scheduleOnReceiveQueue {
+					completion(.success(response))
+				}
+			} catch {
+				let finalError = error.cancellationError ?? error
+				server.scheduleOnReceiveQueue {
+					completion(.failure(finalError))
+				}
+			}
+		}
 	}
 
 	/**
@@ -230,46 +268,50 @@ open class Client {
 	
 	- parameter url:      The URL to read data from
 	- parameter accept:   The accept header to send along
-	- parameter completion: Completion invoked with the FHIR response or an error
+	- returns: The raw FHIR response
 	*/
+	open func getData(from url: URL, accept: String) async throws -> FHIRClient.Response {
+		let path = url.absoluteString
+		let operation = RawFHIRRequestOperation(
+			path: path,
+			headers: ["Accept": accept]
+		)
+
+		do {
+			return try await server.fhirClient.execute(operation: operation)
+		} catch {
+			if let cancellation = error.cancellationError {
+				throw cancellation
+			}
+			throw mapError(error, forPath: path)
+		}
+	}
+
+	@discardableResult
+	@available(*, deprecated, renamed: "getData(from:accept:)")
 	open func getData(
 		from url: URL,
 		accept: String,
 		completion: @escaping (Result<FHIRClient.Response, Error>) -> Void
-	) {
-		let operation = RawFHIRRequestOperation(
-			path: url.absoluteString,
-			headers: ["Accept": accept]
-		)
-		execute(operation: operation, completion: completion)
-	}
-
-	private func execute(
-		operation: RawFHIRRequestOperation,
-		completion: @escaping (Result<FHIRClient.Response, Error>) -> Void
-	) {
-		var cancellable: AnyCancellable?
-		cancellable = server.fhirClient.execute(operation: operation)
-			.sink(
-				receiveCompletion: { [weak self] completionResult in
-					if let cancellable {
-						self?.cancellables.remove(cancellable)
-					}
-					if case .failure(let error) = completionResult {
-						let url = operation.relativeUrlString.flatMap { path -> URL? in
-							guard let self else { return nil }
-							return URL(string: path, relativeTo: self.server.baseURL)
-						}
-						let mapped = SMARTErrorMapper.mapPublic(error: error, url: url)
-						completion(.failure(mapped))
-					}
-				},
-				receiveValue: { response in
+	) -> _Concurrency.Task<Void, Never> {
+		_Concurrency.Task {
+			do {
+				let response = try await getData(from: url, accept: accept)
+				server.scheduleOnReceiveQueue {
 					completion(.success(response))
 				}
-			)
-		if let cancellable {
-			cancellables.insert(cancellable)
+			} catch {
+				let finalError = error.cancellationError ?? error
+				server.scheduleOnReceiveQueue {
+					completion(.failure(finalError))
+				}
+			}
 		}
 	}
+
+	private func mapError(_ error: Error, forPath path: String) -> Error {
+		let resolvedURL = URL(string: path, relativeTo: server.baseURL) ?? URL(string: path)
+		return SMARTErrorMapper.mapPublic(error: error, url: resolvedURL)
+	}
+
 }
