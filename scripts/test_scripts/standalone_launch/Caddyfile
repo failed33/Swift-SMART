@@ -1,0 +1,9 @@
+localhost:8443 {
+    tls internal
+    log {
+        output file /Users/mnkirsch/Coding/FHIR-implementation/Swift-SMART/scripts/test_scripts/standalone_launch/caddy.log
+        format json
+        level INFO
+    }
+    reverse_proxy 127.0.0.1:8080
+}

@@ -1,80 +1,57 @@
 //
 //  Server.swift
-//  SMART-on-FHIR
+//  Swift-SMART
 //
-//  Created by Pascal Pfiffner on 6/11/14.
-//  Copyright (c) 2014 SMART Health IT. All rights reserved.
+//  Rewritten for FHIR R5 + HTTPClient/FHIRClient architecture.
 //
 
+import CombineSchedulers
+import FHIRClient
 import Foundation
+import HTTPClient
+import HTTPClientLive
+import ModelsR5
+import OAuth2
 
+open class Server {
+	public let baseURL: URL
+	public let aud: String
 
-/**
-Representing the FHIR resource server a client connects to.
+	public private(set) var name: String?
 
-This implementation holds on to an `Auth` instance to handle authentication. It is automatically instantiated with properties from the
-settings dictionary provided upon `Client` initalization or from the server's cabability statement.
-
-The server's cabability statement is automatically downloaded the first time it's needed for various tasks, such as instantiating the `Auth`
-instance or validating/executing operations.
-
-A server manages its own NSURLSession, either with an optional delegate provided via `sessionDelegate` or simply the system shared
-session. Subclasses can change this behavior by overriding `createDefaultSession` or any of the other request-related methods.
-*/
-open class Server: FHIROpenServer, OAuth2RequestPerformer {
-	
-	/// The service URL as a string, as specified during initalization to be used as `aud` parameter.
-	public final let aud: String
-	
-	/// An optional name of the server; will be read from cabability statement unless manually assigned.
-	public final var name: String?
-	
-	/// The authorization to use with the server.
 	var auth: Auth? {
 		didSet {
-			if let auth = auth {
-				if let oauth = auth.oauth {
-					oauth.sessionDelegate = sessionDelegate
-					oauth.onBeforeDynamicClientRegistration = onBeforeDynamicClientRegistration
-					if let logger = logger {
-						oauth.logger = logger
-					}
+			oauthInterceptor.auth = auth
+			authRefreshInterceptor?.auth = auth
+
+			if let oauth: OAuth2 = auth?.oauth {
+				oauth.onBeforeDynamicClientRegistration = onBeforeDynamicClientRegistration
+				if let logger = logger {
+					oauth.logger = logger
 				}
-				logger?.debug("SMART", msg: "Initialized server auth of type “\(auth.type.rawValue)”")
+			}
+
+			if let auth {
+				logger?.debug(
+					"SMART", msg: "Initialized server auth of type “\(auth.type.rawValue)”")
 			}
 		}
 	}
-	
-	/// Settings to be applied to the Auth instance.
+
 	var authSettings: OAuth2JSON? {
 		didSet {
 			didSetAuthSettings()
 		}
 	}
-	
-	/// Authenticated identity and profile token of end user; Assigned when scopes `openid` and `profile` are used.
+
 	public var idToken: String? {
-		get { return auth?.oauth?.idToken }
+		auth?.oauth?.idToken
 	}
-	
-	/// The refresh token provided with the access token; Issuing a refresh token is optional at the discretion of the authorization server.
+
 	public var refreshToken: String? {
-		get { return auth?.oauth?.refreshToken }
+		auth?.oauth?.refreshToken
 	}
-	
-	var mustAbortAuthorization = false
-	
-	/// An optional NSURLSessionDelegate.
-	open var sessionDelegate: URLSessionDelegate? {
-		didSet {
-			session = nil
-			if let oauth = auth?.oauth {
-				oauth.sessionDelegate = sessionDelegate
-			}
-		}
-	}
-	
-	/// Allow to inject a custom OAuth2DynReg class and/or setup.
+
 	open var onBeforeDynamicClientRegistration: ((URL) -> OAuth2DynReg)? {
 		didSet {
 			if let oauth = auth?.oauth {
@@ -82,248 +59,569 @@ open class Server: FHIROpenServer, OAuth2RequestPerformer {
 			}
 		}
 	}
-	
-	/// The logger to use.
+
 	open var logger: OAuth2Logger? {
 		didSet {
 			auth?.oauth?.logger = logger
 		}
 	}
-	
-	
-	/**
-	Main initializer. Makes sure the base URL ends with a "/" to facilitate URL generation later on.
-	
-	- parameter baseURL: The base URL of the server
-	- parameter auth:    A dictionary with authentication settings, passed on to the `Auth` initializer
-	*/
-	public required init(baseURL base: URL, auth: OAuth2JSON? = nil) {
-		aud = base.absoluteString
-		authSettings = auth
-		super.init(baseURL: base, auth: auth)
+
+	public private(set) var fhirClient: FHIRClient
+
+	public private(set) var launchContext: LaunchContext?
+
+	public var mustAbortAuthorization = false
+
+	private let receiveQueue: AnySchedulerOf<DispatchQueue>
+	private let oauthInterceptor: OAuth2BearerInterceptor
+	private let authRefreshInterceptor: AuthRefreshInterceptor?
+	private let retryInterceptor: RetryInterceptor?
+	private let retryPolicy: RetryPolicy
+	private let httpClient: HTTPClient
+	private let configurationDecoder: JSONDecoder = {
+		JSONDecoder()
+	}()
+	private let configurationCache = ConfigurationCache()
+
+	public init(
+		baseURL: URL,
+		auth: OAuth2JSON? = nil,
+		httpClient: HTTPClient? = nil,
+		receiveQueue: AnySchedulerOf<DispatchQueue> = .main,
+		retryPolicy: RetryPolicy? = nil,
+		additionalInterceptors: [Interceptor] = []
+	) {
+		baseURL.assertAbsolute()
+
+		let normalizedBase = baseURL.smartEnsuringTrailingSlash()
+		self.baseURL = normalizedBase
+		self.aud = baseURL.smartRemovingTrailingSlash()
+		self.authSettings = auth
+		self.receiveQueue = receiveQueue
+
+		self.retryPolicy = retryPolicy ?? RetryPolicy()
+		self.oauthInterceptor = OAuth2BearerInterceptor(auth: nil)
+
+		if let httpClient {
+			self.authRefreshInterceptor = nil
+			self.retryInterceptor = nil
+			self.httpClient = httpClient
+		} else {
+			let configuration = URLSessionConfiguration.default
+			let authRefresh = AuthRefreshInterceptor(auth: nil)
+			let retry = RetryInterceptor(policy: self.retryPolicy)
+			self.authRefreshInterceptor = authRefresh
+			self.retryInterceptor = retry
+			var composedInterceptors: [Interceptor] = [oauthInterceptor, authRefresh, retry]
+			composedInterceptors.append(contentsOf: additionalInterceptors)
+			self.httpClient = DefaultHTTPClient(
+				urlSessionConfiguration: configuration,
+				interceptors: composedInterceptors
+			)
+		}
+
+		self.fhirClient = FHIRClient(
+			server: normalizedBase,
+			httpClient: self.httpClient,
+			receiveQueue: receiveQueue
+		)
+
 		didSetAuthSettings()
 	}
-	
-	func didSetAuthSettings() {
-		if !instantiateAuthFromAuthSettings(), let verbose = authSettings?["verbose"] as? Bool, verbose {
-			logger = OAuth2DebugLogger()
+
+	// MARK: - Discovery
+
+	open func getSMARTConfiguration(forceRefresh: Bool = false) async throws -> SMARTConfiguration {
+		let task = await startSMARTConfigurationTask(forceRefresh: forceRefresh)
+		return try await task.value
+	}
+
+	@discardableResult
+	@available(*, deprecated, renamed: "getSMARTConfiguration(forceRefresh:)")
+	open func getSMARTConfiguration(
+		forceRefresh: Bool = false,
+		completion: @escaping (Result<SMARTConfiguration, Error>) -> Void
+	) -> _Concurrency.Task<Void, Never> {
+		let scheduler = receiveQueue
+		return _Concurrency.Task {
+			do {
+				let configuration = try await self.getSMARTConfiguration(forceRefresh: forceRefresh)
+				scheduler.schedule {
+					completion(.success(configuration))
+				}
+			} catch {
+				let finalError = error.cancellationError ?? error
+				scheduler.schedule {
+					completion(.failure(finalError))
+				}
+			}
 		}
 	}
-	
-	
-	// MARK: - Requests
-	
-	/**
-	Instantiate the server's default URLSession.
-	
-	- returns: The URLSession created
-	*/
-	override open func createDefaultSession() -> URLSession {
-		if let delegate = sessionDelegate {
-			return Foundation.URLSession(configuration: URLSessionConfiguration.default, delegate: delegate, delegateQueue: nil)
+
+	private func startSMARTConfigurationTask(forceRefresh: Bool)
+		async -> _Concurrency.Task<SMARTConfiguration, Error>
+	{
+		if !forceRefresh, let cached = await configurationCache.cachedConfigurationValue() {
+			return _Concurrency.Task(priority: nil) { cached }
 		}
-		return super.createDefaultSession()
+
+		if !forceRefresh, let current = await configurationCache.currentTaskValue() {
+			return current
+		}
+
+		let task = _Concurrency.Task<SMARTConfiguration, Error> {
+			let wellKnownURL = SMARTConfiguration.wellKnownURL(for: self.baseURL)
+			var request = URLRequest(url: wellKnownURL)
+			request.httpMethod = "GET"
+
+			do {
+				let response = try await self.httpClient.sendAsync(
+					request: request,
+					interceptors: []
+				)
+
+				guard (200..<300).contains(response.status.rawValue) else {
+					throw SMARTClientError.configuration(
+						url: wellKnownURL,
+						underlying: SMARTConfigurationError.invalidHTTPStatus(
+							response.status.rawValue)
+					)
+				}
+
+				let rawConfiguration = try self.configurationDecoder.decode(
+					SMARTConfiguration.self,
+					from: response.data
+				)
+				let configuration = self.rewriteSMARTConfigurationIfNeeded(rawConfiguration)
+
+				await self.configurationCache.store(configuration: configuration)
+				return configuration
+			} catch {
+				await self.configurationCache.clearTask()
+				throw SMARTClientError.configuration(url: wellKnownURL, underlying: error)
+			}
+		}
+
+		await configurationCache.store(task: task)
+		return task
 	}
-	
-	/**
-	Return a URLRequest for the given url, possibly already signed, that can be further configured.
-	
-	- parameter url: The URL the request will work against
-	- returns:       A preconfigured URLRequest
-	*/
-	override open func configurableRequest(for url: URL) -> URLRequest {
-		return auth?.signedRequest(forURL: url) ?? super.configurableRequest(for: url)
+
+	private func rewriteSMARTConfigurationIfNeeded(_ configuration: SMARTConfiguration)
+		-> SMARTConfiguration
+	{
+		let rewrittenAuthorize = rewriteOAuthEndpointIfNeeded(configuration.authorizationEndpoint)
+		let rewrittenToken = rewriteOAuthEndpointIfNeeded(configuration.tokenEndpoint)
+		let rewrittenRegistration = configuration.registrationEndpoint.map {
+			rewriteOAuthEndpointIfNeeded($0)
+		}
+
+		if rewrittenAuthorize == configuration.authorizationEndpoint,
+			rewrittenToken == configuration.tokenEndpoint,
+			rewrittenRegistration == configuration.registrationEndpoint
+		{
+			return configuration
+		}
+
+		return SMARTConfiguration(
+			authorizationEndpoint: rewrittenAuthorize,
+			tokenEndpoint: rewrittenToken,
+			registrationEndpoint: rewrittenRegistration,
+			managementEndpoint: configuration.managementEndpoint,
+			introspectionEndpoint: configuration.introspectionEndpoint,
+			revocationEndpoint: configuration.revocationEndpoint,
+			jwksEndpoint: configuration.jwksEndpoint,
+			issuer: configuration.issuer,
+			grantTypesSupported: configuration.grantTypesSupported,
+			responseTypesSupported: configuration.responseTypesSupported,
+			scopesSupported: configuration.scopesSupported,
+			codeChallengeMethodsSupported: configuration.codeChallengeMethodsSupported,
+			tokenEndpointAuthMethodsSupported: configuration.tokenEndpointAuthMethodsSupported,
+			tokenEndpointAuthSigningAlgValuesSupported: configuration
+				.tokenEndpointAuthSigningAlgValuesSupported,
+			capabilities: configuration.capabilities,
+			smartVersion: configuration.smartVersion,
+			fhirVersion: configuration.fhirVersion,
+			additionalFields: configuration.additionalFields
+		)
 	}
-	
-	
-	// MARK: - FHIROpenServer
-	
-	open override func perform(request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionTask? {
-		logger?.debug("SMART", msg: "--->  \(request.httpMethod ?? "???") \(request.url?.description ?? "No URL")")
-		logger?.trace("SMART", msg: "REQUEST\n\(String(describing: request))\n---")
-		return super.perform(request: request) { data, response, error in
-			self.logger?.trace("SMART", msg: "RESPONSE\n\(response.debugDescription)\n---")
-			self.logger?.debug("SMART", msg: "<---  \((response as? HTTPURLResponse)?.statusCode ?? 999) (\(data?.count ?? 0) Byte)")
-			completionHandler(data, response, error)
+
+	// MARK: - Readiness
+
+	open func ready() async throws {
+		let configuration = try await getSMARTConfiguration()
+		try ensurePKCES256Support(in: configuration)
+		mergeAuthSettings(with: configuration)
+
+		if auth == nil, !instantiateAuthFromAuthSettings() {
+			throw SMARTError.configuration(
+				"Failed to detect the authorization method from SMART configuration")
 		}
 	}
-	
-	
-	// MARK: - Server Capability Statement
-	
-	override open func didSetCapabilityStatement(_ cabability: CapabilityStatement) {
-		if nil == name, let cName = cabability.name?.string {
-			name = cName
-		}
-		super.didSetCapabilityStatement(cabability)
-	}
-	
-	override open func didFindCapabilityStatementRest(_ rest: CapabilityStatementRest) {
-		super.didFindCapabilityStatementRest(rest)
-		
-		// initialize Auth; if we can't find a suitable Auth we'll use one for "no auth"
-		if let security = rest.security {
-			auth = Auth(fromCapabilitySecurity: security, server: self, settings: authSettings)
-		}
-		if nil == auth {
-			auth = Auth(type: .none, server: self, settings: authSettings)
-			logger?.debug("SMART", msg: "Server seems to be open, proceeding with none-type auth")
+
+	@discardableResult
+	@available(*, deprecated, renamed: "ready()")
+	open func ready(callback: @escaping (Error?) -> Void) -> _Concurrency.Task<Void, Never> {
+		return _Concurrency.Task {
+			do {
+				try await ready()
+				scheduleOnReceiveQueue {
+					callback(nil)
+				}
+			} catch {
+				let finalError = error.cancellationError ?? error
+				scheduleOnReceiveQueue {
+					callback(finalError)
+				}
+			}
 		}
 	}
-	
-	
-	// MARK: - Authorization
-	
-	/// The auth credentials currently in use by the receiver.
-	open var authClientCredentials: (id: String, secret: String?, name: String?)? {
-		if let clientId = auth?.oauth?.clientId, !clientId.isEmpty {
-			return (id: clientId, secret: auth?.oauth?.clientSecret, name: auth?.oauth?.clientName)
+
+	private func ensurePKCES256Support(in configuration: SMARTConfiguration) throws {
+		guard let methods = configuration.codeChallengeMethodsSupported,
+			methods.contains(where: { $0.caseInsensitiveCompare("S256") == .orderedSame })
+		else {
+			throw SMARTError.configuration(
+				"SMART configuration at \(baseURL.absoluteString) does not advertise PKCE S256 support"
+			)
 		}
-		return nil
 	}
-	
-	/**
-	Attempt to instantiate our `Auth` instance from `authSettings` and assign to our `auth` ivar.
-	*/
+
+	private func mergeAuthSettings(with configuration: SMARTConfiguration) {
+		var settings = authSettings ?? OAuth2JSON()
+
+		if settings["authorize_uri"] == nil {
+			let endpoint = rewriteOAuthEndpointIfNeeded(configuration.authorizationEndpoint)
+			settings["authorize_uri"] = endpoint.absoluteString
+		}
+		if settings["token_uri"] == nil {
+			let endpoint = rewriteOAuthEndpointIfNeeded(configuration.tokenEndpoint)
+			settings["token_uri"] = endpoint.absoluteString
+		}
+		if settings["registration_uri"] == nil,
+			let registration = configuration.registrationEndpoint
+		{
+			let endpoint = rewriteOAuthEndpointIfNeeded(registration)
+			settings["registration_uri"] = endpoint.absoluteString
+		}
+		if settings["aud"] == nil {
+			settings["aud"] = aud
+		}
+
+		authSettings = settings
+	}
+
+	/// When running tests against servers that advertise HTTP OAuth endpoints, allow remapping
+	/// those endpoints to an HTTPS proxy base via the `SMART_HTTPS_AUTH_BASE` environment variable.
+	/// This enables local TLS termination without changing the underlying FHIR base URL.
+	private func rewriteOAuthEndpointIfNeeded(_ url: URL) -> URL {
+		guard url.scheme?.lowercased() == "http",
+			let baseString = ProcessInfo.processInfo.environment["SMART_HTTPS_AUTH_BASE"],
+			let base = URL(string: baseString),
+			var urlComponents = URLComponents(url: url, resolvingAgainstBaseURL: false),
+			let baseComponents = URLComponents(url: base, resolvingAgainstBaseURL: false)
+		else {
+			return url
+		}
+
+		self.logger?.debug(
+			"SMART",
+			msg: "Rewriting OAuth endpoint from \(url.absoluteString) to \(base.absoluteString)")
+
+		urlComponents.scheme = baseComponents.scheme
+		urlComponents.host = baseComponents.host
+		urlComponents.port = baseComponents.port
+
+		let basePath = (baseComponents.path as NSString).standardizingPath
+		let urlPath = (urlComponents.path as NSString).standardizingPath
+		let combinedPath: String
+		if basePath.isEmpty || basePath == "/" {
+			combinedPath = urlPath
+		} else {
+			let trimmedBase = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
+			combinedPath = trimmedBase + (urlPath.hasPrefix("/") ? urlPath : "/" + urlPath)
+		}
+		urlComponents.path = combinedPath
+
+		return urlComponents.url ?? url
+	}
+
+	private func didSetAuthSettings() {
+		_ = instantiateAuthFromAuthSettings()
+	}
+
+	@discardableResult
 	func instantiateAuthFromAuthSettings() -> Bool {
+		guard let authSettings else { return false }
+
 		var authType: AuthType? = nil
-		if let typ = authSettings?["authorize_type"] as? String {
-			authType = AuthType(rawValue: typ)
+
+		if let typeString = authSettings["authorize_type"] as? String {
+			authType = AuthType(rawValue: typeString)
 		}
-		if nil == authType || .none == authType! {
-			if let _ = authSettings?["authorize_uri"] as? String {
-				if let _ = authSettings?["token_uri"] as? String {
-					authType = .codeGrant
-				}
-				else {
-					authType = .implicitGrant
-				}
+
+		if authType == nil || authType == AuthType.none {
+			if authSettings["authorize_uri"] != nil {
+				authType = authSettings["token_uri"] != nil ? .codeGrant : .implicitGrant
 			}
 		}
-		if let type = authType {
-			auth = Auth(type: type, server: self, settings: authSettings)
-			return true
+
+		guard let type = authType else {
+			return false
 		}
-		return false
+
+		auth = Auth(type: type, server: self, settings: authSettings)
+		return true
 	}
-	
-	/**
-	Ensures that the server is ready to perform requests before calling the callback.
-	
-	Being "ready" in this case entails holding on to an `Auth` instance. Such an instance is automatically created if either the client
-	init settings are sufficient (i.e. contain an "authorize_uri" and optionally a "token_uri" and a "client_id" or "registration_uri") or
-	after the cabability statement has been fetched.
-	*/
-	open func ready(callback: @escaping (FHIRError?) -> ()) {
-		if nil != auth || instantiateAuthFromAuthSettings() {
-			callback(nil)
-			return
+
+	// MARK: - Authorization Flow
+
+	open func authorize(with properties: SMARTAuthProperties) async throws -> Patient? {
+		try await ready()
+
+		if mustAbortAuthorization {
+			mustAbortAuthorization = false
+			return nil
 		}
-		
-		// if we haven't initialized the auth instance we likely didn't fetch the server metadata yet
-		getCapabilityStatement() { error in
-			if nil != self.auth {
-				callback(nil)
-			}
-			else {
-				callback(error ?? FHIRError.error("Failed to detect the authorization method from server metadata"))
-			}
+
+		guard let auth else {
+			throw SMARTError.missingAuthorization
 		}
-	}
-	
-	/**
-	Ensures that the receiver is ready, then calls the auth method's `authorize()` method.
-	
-	- parameter properties: The auth properties to use
-	- parameter callback:   Callback to call when authorization is complete, providing the chosen patient (if the patient scope was
-	                        provided) or an error, if any
-	*/
-	open func authorize(with properties: SMARTAuthProperties, callback: @escaping ((_ patient: Patient?, _ error: Error?) -> Void)) {
-		ready() { error in
-			if self.mustAbortAuthorization {
-				self.mustAbortAuthorization = false
-				callback(nil, nil)
-			}
-			else if nil != error || nil == self.auth {
-				callback(nil, error ?? FHIRError.error("Client error, no auth instance created"))
-			}
-			else {
-				self.auth!.authorize(with: properties) { parameters, error in
+
+		return try await withTaskCancellationHandler {
+			try await withCheckedThrowingContinuation { continuation in
+				auth.authorize(with: properties) { parameters, error in
 					if self.mustAbortAuthorization {
 						self.mustAbortAuthorization = false
-						callback(nil, nil)
+						continuation.resume(returning: nil)
+						return
 					}
-					else if let error = error {
-						callback(nil, error)
+
+					if let error {
+						continuation.resume(throwing: error)
+						return
 					}
-					else if let patient = parameters?["patient_resource"] as? Patient {		// native patient list auth flow will deliver a Patient instance
-						callback(patient, nil)
+
+					if let patient = parameters?["patient_resource"] as? Patient {
+						continuation.resume(returning: patient)
+						return
 					}
-					else if let patientId = parameters?["patient"] as? String {
-						Patient.read(patientId, server: self) { resource, error in
-							self.logger?.debug("SMART", msg: "Did read patient \(String(describing: resource)) with error \(String(describing: error))")
-							callback(resource as? Patient, error)
+
+					if let patientId = parameters?["patient"] as? String {
+						_Concurrency.Task {
+							do {
+								let patient = try await self.readPatient(id: patientId)
+								self.logger?.debug(
+									"SMART",
+									msg: "Did read patient with result success(\(patientId))")
+								continuation.resume(returning: patient)
+							} catch {
+								self.logger?.debug(
+									"SMART",
+									msg: "Did read patient with result failure(\(error))")
+								continuation.resume(throwing: error)
+							}
 						}
+						return
 					}
-					else {
-						callback(nil, nil)
-					}
+
+					continuation.resume(returning: nil)
+				}
+			}
+		} onCancel: {
+			self.mustAbortAuthorization = true
+			self.auth?.abort()
+		}
+	}
+
+	@discardableResult
+	@available(*, deprecated, renamed: "authorize(with:)")
+	open func authorize(
+		with properties: SMARTAuthProperties,
+		callback: @escaping (_ patient: Patient?, _ error: Error?) -> Void
+	) -> _Concurrency.Task<Void, Never> {
+		return _Concurrency.Task {
+			do {
+				let patient = try await authorize(with: properties)
+				scheduleOnReceiveQueue {
+					callback(patient, nil)
+				}
+			} catch {
+				let finalError = error.cancellationError ?? error
+				scheduleOnReceiveQueue {
+					callback(nil, finalError)
 				}
 			}
 		}
 	}
-	
-	/**
-	Aborts ongoing authorization and requests session.
-	*/
+
 	open func abort() {
-		abortAuthorization()
-		abortSession()
-	}
-	
-	func abortAuthorization() {
 		mustAbortAuthorization = true
-		if nil != auth {
-			auth!.abort()
-		}
+		auth?.abort()
 	}
-	
-	/**
-	Resets authorization state - including deletion of any known access and refresh tokens.
-	*/
+
 	func reset() {
 		abort()
 		auth?.reset()
 	}
-	
-	
-	// MARK: - Client Registration
-	
-	/**
-	Runs dynamic client registration unless the client has a client id (or no registration URL is known). Since this happens automatically
-	during `authorize()` you probably won't need to call this method explicitly.
-	
-	- parameter callback: The callback to call when completed or failed; if both json and error is nil no registration was attempted
-	*/
-	open func registerIfNeeded(callback: @escaping ((_ json: OAuth2JSON?, _ error: Error?) -> Void)) {
-		ready() { error in
-			if nil != error || nil == self.auth {
-				callback(nil, error ?? FHIRError.error("Client error, no auth instance created"))
-			}
-			else if let oauth = self.auth?.oauth {
-				oauth.registerClientIfNeeded(callback: callback)
-			}
-			else {
-				callback(nil, nil)
+
+	open var authClientCredentials: (id: String, secret: String?, name: String?)? {
+		guard let oauth = auth?.oauth, let clientId = oauth.clientId, !clientId.isEmpty else {
+			return nil
+		}
+		return (clientId, oauth.clientSecret, oauth.clientName)
+	}
+
+	open func registerIfNeeded() async throws -> OAuth2JSON? {
+		try await ready()
+		guard let oauth = auth?.oauth else {
+			throw SMARTError.missingAuthorization
+		}
+
+		return try await withCheckedThrowingContinuation { continuation in
+			oauth.registerClientIfNeeded { json, error in
+				if let error {
+					continuation.resume(throwing: error)
+					return
+				}
+
+				continuation.resume(returning: json)
 			}
 		}
 	}
-	
+
+	@discardableResult
+	@available(*, deprecated, renamed: "registerIfNeeded()")
+	open func registerIfNeeded(
+		callback: @escaping (_ json: OAuth2JSON?, _ error: Error?) -> Void
+	) -> _Concurrency.Task<Void, Never> {
+		return _Concurrency.Task {
+			do {
+				let json = try await registerIfNeeded()
+				scheduleOnReceiveQueue {
+					callback(json, nil)
+				}
+			} catch {
+				let finalError = error.cancellationError ?? error
+				scheduleOnReceiveQueue {
+					callback(nil, finalError)
+				}
+			}
+		}
+	}
+
 	func forgetClientRegistration() {
 		auth?.forgetClientRegistration()
 		auth = nil
 	}
+
+	func updateLaunchContext(_ context: LaunchContext?) {
+		launchContext = context
+	}
+
+	func scheduleOnReceiveQueue(_ action: @escaping () -> Void) {
+		receiveQueue.schedule(action)
+	}
+
+	public func read<T: ModelsR5.Resource>(_ type: T.Type, id: String) async throws -> T {
+		let resourceName =
+			String(describing: type).split(separator: ".").last.map(String.init)
+			?? String(describing: type)
+		let path = "\(resourceName)/\(id)"
+		let operation = DecodingFHIRRequestOperation<T>(
+			path: path,
+			headers: ["Accept": "application/fhir+json"]
+		)
+
+		do {
+			return try await fhirClient.execute(operation: operation)
+		} catch {
+			if let cancellation = error.cancellationError {
+				throw cancellation
+			}
+			let url = URL(string: path, relativeTo: baseURL)
+			throw SMARTErrorMapper.mapPublic(error: error, url: url)
+		}
+	}
+
+	public func readPatient(id: String) async throws -> ModelsR5.Patient {
+		try await read(ModelsR5.Patient.self, id: id)
+	}
+
+	@discardableResult
+	@available(*, deprecated, renamed: "readPatient(id:)")
+	func fetchPatient(
+		id: String,
+		completion: @escaping (Result<ModelsR5.Patient, Error>) -> Void
+	) -> _Concurrency.Task<Void, Never> {
+		let scheduler = receiveQueue
+		return _Concurrency.Task {
+			do {
+				let patient = try await readPatient(id: id)
+				scheduler.schedule {
+					completion(.success(patient))
+				}
+			} catch {
+				let finalError = error.cancellationError ?? error
+				scheduler.schedule {
+					completion(.failure(finalError))
+				}
+			}
+		}
+	}
+}
+
+private actor ConfigurationCache {
+	private var cachedConfiguration: SMARTConfiguration?
+	private var runningTask: _Concurrency.Task<SMARTConfiguration, Error>?
+
+	func cachedConfigurationValue() -> SMARTConfiguration? {
+		cachedConfiguration
+	}
+
+	func currentTaskValue() -> _Concurrency.Task<SMARTConfiguration, Error>? {
+		runningTask
+	}
+
+	func store(task: _Concurrency.Task<SMARTConfiguration, Error>) {
+		runningTask = task
+	}
+
+	func store(configuration: SMARTConfiguration) {
+		cachedConfiguration = configuration
+		runningTask = nil
+	}
+
+	func clearTask() {
+		runningTask = nil
+	}
+}
+
+// MARK: - URL Normalization Helpers
+
+extension URL {
+	/// Returns a URL guaranteed to end with a trailing slash so Foundation treats it as a directory
+	/// base when resolving relative paths.
+	fileprivate func smartEnsuringTrailingSlash() -> URL {
+		guard !absoluteString.hasSuffix("/") else { return self }
+		// appending an empty path component marked as a directory preserves existing query/fragment.
+		return appendingPathComponent("", isDirectory: true)
+	}
+
+	/// Returns the absolute string without an optional trailing slash, keeping other components
+	/// (scheme, host, query, fragment) untouched.
+	fileprivate func smartRemovingTrailingSlash() -> String {
+		var absolute = absoluteString
+		if absolute.count > 1, absolute.hasSuffix("/") {
+			absolute.removeLast()
+		}
+		return absolute
+	}
+}
+
+extension URL {
+	fileprivate func assertAbsolute() {
+		precondition(scheme != nil, "Server baseURL must be absolute")
+	}
 }
 
 public typealias FHIRBaseServer = Server
-

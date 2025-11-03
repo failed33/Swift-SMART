@@ -1,0 +1,15 @@
+{
+  "resourceType": "OperationOutcome",
+  "id": "test-outcome",
+  "issue": [
+    {
+      "severity": "error",
+      "code": "processing",
+      "details": {
+        "text": "Token expired"
+      },
+      "diagnostics": "Access token expired"
+    }
+  ]
+}
+
