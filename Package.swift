@@ -8,7 +8,7 @@ import PackageDescription
 let package = Package(
     name: "SMART",
     platforms: [
-        .macOS(.v12), .iOS(.v13),
+        .macOS(.v12), .iOS(.v14),
     ],
     products: [
         .library(
@@ -83,12 +83,12 @@ let package = Package(
                 "FHIRClient",
                 "HTTPClient",
                 "HTTPClientLive",
-                .product(name: "ModelsR5", package: "FHIRModels")
+                .product(name: "ModelsR5", package: "FHIRModels"),
             ],
             path: "Tests",
             exclude: [
                 "strategy",
-                "Info.plist"
+                "Info.plist",
             ],
             resources: [
                 .process("Fixtures")
