@@ -595,8 +595,9 @@ class OAuth2InterceptorTests: XCTestCase {
         let server = Server(baseURL: URL(string: "https://fhir.example.org")!)
         let auth = Auth(type: .codeGrant, server: server, settings: ["client_id": "test"])
 
-        auth.oauth = OAuth2CodeGrant(settings: ["client_id": "test"])
-        auth.oauth?.clientConfig.accessToken = "test-token-123"
+        let oauth = OAuth2CodeGrant(settings: ["client_id": "test"])
+        oauth.clientConfig.accessToken = "test-token-123"
+        auth.replaceOAuthForTesting(oauth)
 
         let interceptor = OAuth2BearerInterceptor(auth: auth)
 

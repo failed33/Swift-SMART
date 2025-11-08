@@ -20,13 +20,10 @@
 // For additional notes and disclaimer from gematik and in case of changes by gematik find details in the "Readme" file.
 //
 
-import Combine
 import CombineSchedulers
 import Foundation
 import HTTPClient
 import ModelsR5
-
-private typealias ConcurrencyTask = _Concurrency.Task
 
 extension FHIRClient {
     // sourcery: CodedError = "520"
@@ -116,8 +113,23 @@ public class FHIRClient {
     /// - Parameter operation: The request to be performed will be derived from this `FHIRClientOperation`.
     /// - Returns: The decoded response value
     public func execute<F: FHIRClientOperation>(operation: F) async throws -> F.Value {
-        guard let relativeURlString = operation.relativeUrlString,
-            let targetUrl = URL(string: relativeURlString, relativeTo: server)
+        let request = try makeRequest(for: operation)
+        do {
+            let (data, urlResponse, status) = try await httpClient.sendAsync(request: request)
+            return try Self.processResponse(
+                operation: operation,
+                data: data,
+                response: urlResponse,
+                status: status
+            )
+        } catch {
+            throw error.asFHIRClientError()
+        }
+    }
+
+    fileprivate func makeRequest<F: FHIRClientOperation>(for operation: F) throws -> URLRequest {
+        guard let relativeURLString = operation.relativeUrlString,
+            let targetUrl = URL(string: relativeURLString, relativeTo: server)
         else {
             throw Error.internalError("Operation endpoint url could not be constructed")
         }
@@ -125,66 +137,49 @@ public class FHIRClient {
         var request = URLRequest(url: targetUrl)
         request.allHTTPHeaderFields = operation.httpHeaders
         request.httpMethod = operation.httpMethod.rawValue
-        if let bodyData = operation.httpBody {
-            request.httpBody = bodyData
-        }
+        request.httpBody = operation.httpBody
+        return request
+    }
 
-        do {
-            let (data, urlResponse, status) = try await httpClient.sendAsync(request: request)
-            let response = FHIRClient.Response.from(
-                response: urlResponse,
-                status: status,
-                data: data
+    fileprivate static func processResponse<F: FHIRClientOperation>(
+        operation: F,
+        data: Data,
+        response: HTTPURLResponse,
+        status: HTTPStatusCode
+    ) throws -> F.Value {
+        let responseWrapper = FHIRClient.Response.from(
+            response: response,
+            status: status,
+            data: data
+        )
+
+        guard responseWrapper.status.isSuccessful else {
+            let urlError = URLError(
+                URLError.Code(rawValue: responseWrapper.status.rawValue),
+                userInfo: ["body": responseWrapper.body]
+            )
+            let outcome = try? JSONDecoder().decode(
+                ModelsR5.OperationOutcome.self,
+                from: responseWrapper.body
             )
 
-            guard response.status.isSuccessful else {
-                let urlError = URLError(
-                    URLError.Code(rawValue: response.status.rawValue),
-                    userInfo: ["body": response.body]
+            throw Error.http(
+                FHIRClientHttpError(
+                    httpClientError: .httpError(urlError),
+                    operationOutcome: outcome
                 )
-                let outcome = try? JSONDecoder().decode(
-                    ModelsR5.OperationOutcome.self,
-                    from: response.body
-                )
-
-                throw Error.http(
-                    FHIRClientHttpError(
-                        httpClientError: .httpError(urlError),
-                        operationOutcome: outcome
-                    )
-                )
-            }
-
-            return try operation.handle(response: response)
-        } catch {
-            throw error.asFHIRClientError()
+            )
         }
-    }
 
-    /// Perform a request derived from a `FHIRClientOperation`.
-    ///
-    /// - Parameter operation: The request to be performed will be derived from this `FHIRClientOperation`.
-    /// - Returns: `AnyPublisher` that emits a `FHIRClient.Response`
-    @available(*, deprecated, message: "Use async version instead")
-    public func execute<F: FHIRClientOperation>(operation: F) -> AnyPublisher<
-        F.Value, FHIRClient.Error
-    > {
-        Deferred {
-            Future { promise in
-                ConcurrencyTask {
-                    do {
-                        let value = try await self.execute(operation: operation)
-                        promise(.success(value))
-                    } catch {
-                        promise(.failure(error.asFHIRClientError()))
-                    }
-                }
-            }
-        }
-        .receive(on: receiveQueue)
-        .eraseToAnyPublisher()
+        return try operation.handle(response: responseWrapper)
     }
 }
+
+extension FHIRClient: @unchecked Sendable {}
+
+extension FHIRClient.Error: @unchecked Sendable {}
+
+extension FHIRClientHttpError: @unchecked Sendable {}
 
 extension FHIRClient {
     /// 'Anonymous-inner-class' for FHIRResponseHandler

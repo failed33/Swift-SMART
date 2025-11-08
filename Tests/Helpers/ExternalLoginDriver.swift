@@ -9,8 +9,37 @@ import Foundation
 
 enum ExternalLoginDriver {
 
-    private static let recorderQueue = DispatchQueue(label: "ExternalLoginDriver.recorder")
-    private static var recordedAuthorizeURL: URL?
+    private actor Recorder {
+        var authorizeURL: URL?
+
+        func record(_ url: URL) {
+            authorizeURL = url
+        }
+
+        func take() -> URL? {
+            defer { authorizeURL = nil }
+            return authorizeURL
+        }
+    }
+
+    private static let recorder = Recorder()
+    fileprivate final class ErrorBox: @unchecked Sendable {
+        private var value: Error?
+        private let queue = DispatchQueue(label: "ExternalLoginDriver.error")
+
+        func set(_ error: Error?) {
+            queue.sync {
+                value = error
+            }
+        }
+
+        func take() -> Error? {
+            queue.sync {
+                defer { value = nil }
+                return value
+            }
+        }
+    }
 
     static func open(_ url: URL) throws {
         recordAuthorizeURL(url)
@@ -40,15 +69,15 @@ enum ExternalLoginDriver {
         )
 
         let semaphore = DispatchSemaphore(value: 0)
-        var capturedError: Error?
+        let errorBox = ErrorBox()
 
         let task = URLSession.shared.dataTask(with: request) { _, response, error in
             if let error {
-                capturedError = error
+                errorBox.set(error)
             } else if let http = response as? HTTPURLResponse,
                 http.statusCode >= 300
             {
-                capturedError = NSError(
+                let wrapped = NSError(
                     domain: "ExternalLoginDriver",
                     code: http.statusCode,
                     userInfo: [
@@ -56,28 +85,26 @@ enum ExternalLoginDriver {
                             "Automation endpoint returned status \(http.statusCode)"
                     ]
                 )
+                errorBox.set(wrapped)
             }
             semaphore.signal()
         }
         task.resume()
         _ = semaphore.wait(timeout: .now() + 5)
 
-        if let error = capturedError {
+        if let error = errorBox.take() {
             throw error
         }
     }
 
     private static func recordAuthorizeURL(_ url: URL) {
-        recorderQueue.sync {
-            recordedAuthorizeURL = url
+        Task {
+            await recorder.record(url)
         }
     }
 
-    static func takeRecordedAuthorizeURL() -> URL? {
-        recorderQueue.sync {
-            defer { recordedAuthorizeURL = nil }
-            return recordedAuthorizeURL
-        }
+    static func takeRecordedAuthorizeURL() async -> URL? {
+        await recorder.take()
     }
 
     private static func openInDefaultBrowser(_ url: URL) {

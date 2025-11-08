@@ -1,21 +1,23 @@
-@testable import SMART
 import Foundation
 import HTTPClient
 import OAuth2
 import XCTest
 
+@testable import SMART
+
+@MainActor
 final class AuthRefreshInterceptorTests: XCTestCase {
-    private var retainedServers: [Server] = []
-
-    override func tearDown() {
-        retainedServers.removeAll()
-        super.tearDown()
-    }
-
     private func makeAuth() -> Auth {
-        let server = Server(baseURL: URL(string: "https://example.org")!, httpClient: MockHTTPClient())
-        retainedServers.append(server)
-        return Auth(type: .codeGrant, server: server, settings: nil)
+        let server = Server(
+            baseURL: URL(string: "https://example.org")!, httpClient: MockHTTPClient())
+        return Auth(
+            type: .codeGrant,
+            server: server,
+            aud: server.aud,
+            initialLogger: nil,
+            settings: nil,
+            uiHandler: TestAuthUIHandler()
+        )
     }
 
     func testPerformsRefreshOnInvalidTokenChallenge() async throws {
@@ -23,7 +25,7 @@ final class AuthRefreshInterceptorTests: XCTestCase {
         let oauth = MockOAuth2()
         oauth.forceTokenExpiration = true
         oauth.nextResult = (["access_token": "fresh-token"], nil)
-        auth.oauth = oauth
+        auth.replaceOAuthForTesting(oauth)
 
         let interceptor = AuthRefreshInterceptor(auth: auth)
 
@@ -38,7 +40,8 @@ final class AuthRefreshInterceptorTests: XCTestCase {
         )
         let success = TestHTTPResponseFactory.make(status: .ok, url: request.url!, headers: [:])
 
-        let chain = SequencedChain(request: request, results: [.success(unauthorized), .success(success)])
+        let chain = SequencedChain(
+            request: request, results: [.success(unauthorized), .success(success)])
 
         let response = try await interceptor.interceptAsync(chain: chain)
 
@@ -56,7 +59,7 @@ final class AuthRefreshInterceptorTests: XCTestCase {
         let oauth = MockOAuth2()
         oauth.forceTokenExpiration = true
         oauth.nextResult = (["access_token": "fresh-token"], nil)
-        auth.oauth = oauth
+        auth.replaceOAuthForTesting(oauth)
 
         let interceptor = AuthRefreshInterceptor(auth: auth)
 
@@ -70,7 +73,8 @@ final class AuthRefreshInterceptorTests: XCTestCase {
             headers: ["WWW-Authenticate": "Bearer error=\"invalid_token\""]
         )
 
-        let chain = SequencedChain(request: request, results: [.success(unauthorized), .success(unauthorized)])
+        let chain = SequencedChain(
+            request: request, results: [.success(unauthorized), .success(unauthorized)])
 
         let response = try await interceptor.interceptAsync(chain: chain)
 
@@ -83,7 +87,7 @@ final class AuthRefreshInterceptorTests: XCTestCase {
         let auth = makeAuth()
         let oauth = MockOAuth2()
         oauth.forceTokenExpiration = true
-        auth.oauth = oauth
+        auth.replaceOAuthForTesting(oauth)
 
         let interceptor = AuthRefreshInterceptor(auth: auth)
 
@@ -105,5 +109,3 @@ final class AuthRefreshInterceptorTests: XCTestCase {
         XCTAssertEqual(oauth.tryCallCount, 0)
     }
 }
-
-

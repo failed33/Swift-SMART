@@ -1,5 +1,5 @@
 import Foundation
-import ModelsR5
+@preconcurrency import ModelsR5
 
 public enum SMARTClientError: Error {
     case configuration(url: URL, underlying: Error)
@@ -13,6 +13,8 @@ public enum SMARTClientError: Error {
     case network(underlying: Error)
     case other(underlying: Error)
 }
+
+extension SMARTClientError: @unchecked Sendable {}
 
 extension SMARTClientError: LocalizedError {
     public var errorDescription: String? {

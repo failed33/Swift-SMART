@@ -20,7 +20,6 @@
 // For additional notes and disclaimer from gematik and in case of changes by gematik find details in the "Readme" file.
 //
 
-import Combine
 import Foundation
 import HTTPClient
 
@@ -31,16 +30,6 @@ public class AdditionalHeaderInterceptor: Interceptor {
     }
 
     let additionalHeader: [String: String]
-
-    public func interceptPublisher(chain: Chain) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        var request = chain.request
-
-        for (header, value) in additionalHeader {
-            request.setValue(value, forHTTPHeaderField: header)
-        }
-
-        return chain.proceedPublisher(request: request)
-    }
 
     public func interceptAsync(chain: Chain) async throws -> HTTPResponse {
         var request = chain.request

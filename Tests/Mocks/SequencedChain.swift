@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import HTTPClient
 
@@ -12,11 +11,6 @@ final class SequencedChain: Chain {
     init(request: URLRequest, results: [Result<HTTPResponse, HTTPClientError>]) {
         self.request = request
         self.results = results
-    }
-
-    func proceedPublisher(request: URLRequest) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        Fail(error: .internalError("SequencedChain does not support Combine-based execution"))
-            .eraseToAnyPublisher()
     }
 
     func proceedAsync(request: URLRequest) async throws -> HTTPResponse {

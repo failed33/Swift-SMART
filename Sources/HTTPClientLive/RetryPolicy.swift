@@ -135,7 +135,7 @@ enum HTTPDateParser {
         return nil
     }
 
-    private static var formatters: [DateFormatter] = {
+    private static let formatters: [DateFormatter] = {
         let locales = Locale(identifier: "en_US_POSIX")
 
         let rfc1123 = DateFormatter()

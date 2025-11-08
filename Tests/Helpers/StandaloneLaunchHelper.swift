@@ -133,6 +133,7 @@ enum StandaloneLaunchHelper {
             patientData = data
         }
 
+        @MainActor
         func emitAttachments() {
             XCTContext.runActivity(named: "Standalone Launch Artifacts") { activity in
                 if let configuration {
@@ -194,6 +195,7 @@ enum StandaloneLaunchHelper {
         }
     }
 
+    @MainActor
     static func makeClient(
         environment: Environment,
         redirect: String?,

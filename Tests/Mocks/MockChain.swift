@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import HTTPClient
 
@@ -12,10 +11,6 @@ final class MockChain: Chain {
 
     init(request: URLRequest) {
         self.request = request
-    }
-
-    func proceedPublisher(request: URLRequest) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        process(request: request)
     }
 
     func proceedAsync(request: URLRequest) async throws -> HTTPResponse {
@@ -34,20 +29,6 @@ final class MockChain: Chain {
     }
 
     // MARK: - Helpers
-
-    private func process(request: URLRequest) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        modifiedRequest = request
-        proceedCallCount += 1
-
-        if let error = nextError {
-            return Fail(error: error).eraseToAnyPublisher()
-        }
-
-        let response = nextResponse ?? Self.defaultResponse(for: request)
-        return Just(response)
-            .setFailureType(to: HTTPClientError.self)
-            .eraseToAnyPublisher()
-    }
 
     private static func defaultResponse(for request: URLRequest) -> HTTPResponse {
         let url = request.url ?? URL(string: "https://mock.local")!

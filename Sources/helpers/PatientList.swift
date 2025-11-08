@@ -6,10 +6,17 @@
 //  Copyright (c) 2015 SMART Health IT. All rights reserved.
 //
 
-import Combine
 import FHIRClient
 import Foundation
 import ModelsR5
+
+private struct SendableWeakPatientList: @unchecked Sendable {
+	weak var value: PatientList?
+}
+
+private struct SendableServerReference: @unchecked Sendable {
+	let value: Server
+}
 
 public enum PatientListStatus: Int {
 	case unknown
@@ -80,7 +87,7 @@ open class PatientList {
 		return query.hasMore
 	}
 
-	private var cancellables = Set<AnyCancellable>()
+	private var currentTask: _Concurrency.Task<Void, Never>?
 
 	public init(query: PatientListQuery) {
 		self.query = query
@@ -164,32 +171,20 @@ open class PatientList {
 			path: path,
 			headers: ["Accept": "application/fhir+json"]
 		)
-		var cancellable: AnyCancellable?
-		cancellable = server.fhirClient.execute(operation: operation)
-			.sink(
-				receiveCompletion: { [weak self] completion in
-					guard let self else { return }
-					if let cancellable {
-						self.cancellables.remove(cancellable)
-					}
-					switch completion {
-					case .failure(let error):
-						self.lastStatusError = error
-						callOnMainThread {
-							self.status = .ready
-						}
-					case .finished:
-						break
-					}
-				},
-				receiveValue: { [weak self] bundle in
-					self?.handle(bundle: bundle, appendPatients: appendPatients)
-				})
-		if let cancellable {
-			cancellables.insert(cancellable)
+		currentTask?.cancel()
+		let listRef = SendableWeakPatientList(value: self)
+		let serverRef = SendableServerReference(value: server)
+		currentTask = _Concurrency.Task {
+			guard let list = listRef.value else { return }
+			await list.performRetrieveBatch(
+				server: serverRef.value,
+				operation: operation,
+				appendPatients: appendPatients
+			)
 		}
 	}
 
+	@MainActor
 	private func handle(bundle: ModelsR5.Bundle, appendPatients: Bool) {
 		query.update(with: bundle)
 		let newPatients =
@@ -202,14 +197,30 @@ open class PatientList {
 				return nil
 			} ?? []
 		let total = bundle.total?.value?.integer
-		callOnMainThread {
-			if let total, total >= 0 {
-				self.expectedNumberOfPatients = UInt(total)
-			}
-			let existing = appendPatients ? (self.patients ?? []) : []
-			let combined = appendPatients ? existing + newPatients : newPatients
-			self.patients = self.order.ordered(combined)
-			self.status = .ready
+		if let total, total >= 0 {
+			expectedNumberOfPatients = UInt(total)
+		}
+		let existing = appendPatients ? (patients ?? []) : []
+		let combined = appendPatients ? existing + newPatients : newPatients
+		patients = order.ordered(combined)
+		status = .ready
+	}
+
+	@MainActor
+	private func performRetrieveBatch(
+		server: Server,
+		operation: DecodingFHIRRequestOperation<ModelsR5.Bundle>,
+		appendPatients: Bool
+	) async {
+		defer { currentTask = nil }
+		do {
+			let bundle = try await server.execute(operation)
+			handle(bundle: bundle, appendPatients: appendPatients)
+		} catch is CancellationError {
+			status = .ready
+		} catch {
+			lastStatusError = error
+			status = .ready
 		}
 	}
 }

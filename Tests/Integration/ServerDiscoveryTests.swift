@@ -1,8 +1,10 @@
+import Foundation
 import HTTPClient
 import XCTest
 
 @testable import SMART
 
+@MainActor
 final class ServerDiscoveryTests: XCTestCase {
     func testFetchesSMARTConfigurationFromWellKnownEndpoint() async throws {
         let httpClient = MockHTTPClient()

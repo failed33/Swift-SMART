@@ -1,4 +1,4 @@
-import ModelsR5
+@preconcurrency import ModelsR5
 import OAuth2
 import XCTest
 
@@ -28,12 +28,12 @@ final class StandaloneLaunchTests: XCTestCase {
             redirectError, "Redirect handling failed: \(String(describing: redirectError))")
         XCTAssertNil(authorizeError, "Authorization failed: \(String(describing: authorizeError))")
         if artifacts.authorizeURL == nil,
-            let captured = ExternalLoginDriver.takeRecordedAuthorizeURL()
+            let captured = await ExternalLoginDriver.takeRecordedAuthorizeURL()
         {
             artifacts.recordAuthorizeURL(captured)
         }
         if artifacts.authorizeURL == nil,
-            let reconstructed = reconstructAuthorizeURL(from: client)
+            let reconstructed = await reconstructAuthorizeURL(from: client)
         {
             artifacts.recordAuthorizeURL(reconstructed)
         }
@@ -57,20 +57,24 @@ final class StandaloneLaunchTests: XCTestCase {
         }
         XCTAssertEqual(patient.id?.value?.string, launchPatient)
 
-        if let oauth = client.server.auth?.oauth {
-            var snapshot: OAuth2JSON = [:]
-            snapshot["access_token"] =
-                oauth.clientConfig.accessToken != nil ? "<redacted>" : "<missing>"
-            if oauth.clientConfig.refreshToken != nil {
-                snapshot["refresh_token"] = "<redacted>"
-            }
-            if let scope = oauth.scope {
-                snapshot["scope"] = scope
-            }
-            if let expiry = oauth.clientConfig.accessTokenExpiry {
-                let formatter = ISO8601DateFormatter()
-                snapshot["expires_at"] = formatter.string(from: expiry)
-            }
+        if let auth = client.server.auth,
+            let snapshot = try? await auth.withOAuth({ oauth -> OAuth2JSON in
+                var snapshot: OAuth2JSON = [:]
+                snapshot["access_token"] =
+                    oauth.clientConfig.accessToken != nil ? "<redacted>" : "<missing>"
+                if oauth.clientConfig.refreshToken != nil {
+                    snapshot["refresh_token"] = "<redacted>"
+                }
+                if let scope = oauth.scope {
+                    snapshot["scope"] = scope
+                }
+                if let expiry = oauth.clientConfig.accessTokenExpiry {
+                    let formatter = ISO8601DateFormatter()
+                    snapshot["expires_at"] = formatter.string(from: expiry)
+                }
+                return snapshot
+            })
+        {
             artifacts.recordTokenResponse(snapshot)
         }
 
@@ -246,13 +250,13 @@ final class StandaloneLaunchTests: XCTestCase {
 
         XCTAssertNil(redirectError)
         XCTAssertNil(authorizeError)
-        guard client.server.auth?.oauth?.clientConfig.refreshToken != nil else {
+        guard let auth = client.server.auth,
+            try await auth.withOAuth({ $0.clientConfig.refreshToken != nil }) == true
+        else {
             throw XCTSkip("Server did not issue a refresh token")
         }
-        guard let oauth = client.server.auth?.oauth else {
-            XCTFail("Missing OAuth context")
-            return
-        }
+
+        let oauth = try await auth.withOAuth { $0 }
         guard let launchPatient = client.server.launchContext?.patient else {
             throw XCTSkip("Authorization server did not supply patient context")
         }
@@ -343,6 +347,10 @@ final class StandaloneLaunchTests: XCTestCase {
         let redirectError: Error?
     }
 
+    private struct AuthorizationTaskResult: @unchecked Sendable {
+        let patient: ModelsR5.Patient?
+    }
+
     private func executeAuthorization(
         client: Client,
         callbackListener: CallbackListener,
@@ -351,8 +359,9 @@ final class StandaloneLaunchTests: XCTestCase {
         mutateRedirect: ((URL) -> URL)? = nil,
         expectRedirectHandled: Bool = true
     ) async -> AuthorizationOutcome {
-        let authorizeTask = _Concurrency.Task<ModelsR5.Patient?, Error> { @MainActor in
-            try await client.authorize()
+        let authorizeTask = _Concurrency.Task<AuthorizationTaskResult, Error> { @MainActor in
+            let patient = try await client.authorize()
+            return AuthorizationTaskResult(patient: patient)
         }
 
         var redirectError: Error?
@@ -386,7 +395,8 @@ final class StandaloneLaunchTests: XCTestCase {
         var patient: ModelsR5.Patient?
 
         do {
-            patient = try await authorizeTask.value
+            let result = try await authorizeTask.value
+            patient = result.patient
         } catch {
             authorizeError = error
         }
@@ -398,52 +408,54 @@ final class StandaloneLaunchTests: XCTestCase {
         )
     }
 
-    private func reconstructAuthorizeURL(from client: Client) -> URL? {
-        guard let auth = client.server.auth, let oauth = auth.oauth else { return nil }
-        guard let redirect = oauth.redirect ?? oauth.clientConfig.redirect else { return nil }
+    private func reconstructAuthorizeURL(from client: Client) async -> URL? {
+        guard let auth = client.server.auth else { return nil }
+        return try? await auth.withOAuth { oauth -> URL? in
+            guard let redirect = oauth.redirect ?? oauth.clientConfig.redirect else { return nil }
 
-        var components = URLComponents(url: oauth.authURL, resolvingAgainstBaseURL: false)
-        var mergedItems = components?.queryItems ?? []
-        var existingNames = Set(mergedItems.map { $0.name })
+            var components = URLComponents(url: oauth.authURL, resolvingAgainstBaseURL: false)
+            var mergedItems = components?.queryItems ?? []
+            var existingNames = Set(mergedItems.map { $0.name })
 
-        func addParam(_ name: String, _ value: String?) {
-            guard let value, !value.isEmpty else { return }
-            if existingNames.contains(name) {
-                mergedItems.removeAll { $0.name == name }
-                existingNames.remove(name)
+            func addParam(_ name: String, _ value: String?) {
+                guard let value, !value.isEmpty else { return }
+                if existingNames.contains(name) {
+                    mergedItems.removeAll { $0.name == name }
+                    existingNames.remove(name)
+                }
+                mergedItems.append(URLQueryItem(name: name, value: value))
+                existingNames.insert(name)
             }
-            mergedItems.append(URLQueryItem(name: name, value: value))
-            existingNames.insert(name)
-        }
 
-        addParam("redirect_uri", redirect)
-        addParam("state", oauth.context.state)
-        addParam("client_id", oauth.clientId)
-        if let responseType = type(of: oauth).responseType {
-            addParam("response_type", responseType)
-        }
-        addParam("scope", oauth.scope)
-        if oauth.clientConfig.useProofKeyForCodeExchange {
-            addParam("code_challenge", oauth.context.codeChallenge())
-            addParam("code_challenge_method", oauth.context.codeChallengeMethod)
-        }
-        if let authParameters = oauth.authParameters {
-            for (key, value) in authParameters {
-                addParam(key, value)
+            addParam("redirect_uri", redirect)
+            addParam("state", oauth.context.state)
+            addParam("client_id", oauth.clientId)
+            if let responseType = type(of: oauth).responseType {
+                addParam("response_type", responseType)
             }
-        }
-        if let customParameters = oauth.clientConfig.customParameters {
-            for (key, value) in customParameters {
-                addParam(key, value)
+            addParam("scope", oauth.scope)
+            if oauth.clientConfig.useProofKeyForCodeExchange {
+                addParam("code_challenge", oauth.context.codeChallenge())
+                addParam("code_challenge_method", oauth.context.codeChallengeMethod)
             }
-        }
-        addParam("aud", client.server.aud)
-        if let launch = auth.launchParameter, !launch.isEmpty {
-            addParam("launch", launch)
-        }
+            if let authParameters = oauth.authParameters {
+                for (key, value) in authParameters {
+                    addParam(key, value)
+                }
+            }
+            if let customParameters = oauth.clientConfig.customParameters {
+                for (key, value) in customParameters {
+                    addParam(key, value)
+                }
+            }
+            addParam("aud", client.server.aud)
+            if let launch = auth.launchParameter(), !launch.isEmpty {
+                addParam("launch", launch)
+            }
 
-        components?.queryItems = mergedItems.isEmpty ? nil : mergedItems
-        return components?.url
+            components?.queryItems = mergedItems.isEmpty ? nil : mergedItems
+            return components?.url
+        }
     }
 
     private func prepareStandaloneClient(
@@ -493,7 +505,7 @@ final class StandaloneLaunchTests: XCTestCase {
 
         try await client.ready()
 
-        guard let oauth = client.server.auth?.oauth else {
+        guard let auth = client.server.auth else {
             XCTFail("OAuth configuration missing after readiness")
             throw NSError(
                 domain: "StandaloneLaunchTests",
@@ -502,11 +514,14 @@ final class StandaloneLaunchTests: XCTestCase {
             )
         }
 
-        oauth.logger = logger
-        configureOAuth?(oauth)
-        // TODO: For debugging/testing purpous we disable the keychain and saved tokens so we get prompted to the GUI picker every time
-        oauth.useKeychain = false
-        oauth.forgetTokens()
+        let oauth = try await auth.withOAuth { oauth -> OAuth2 in
+            oauth.logger = logger
+            configureOAuth?(oauth)
+            // TODO: For debugging/testing purposes we disable the keychain and saved tokens so we get prompted to the GUI picker every time
+            oauth.useKeychain = false
+            oauth.forgetTokens()
+            return oauth
+        }
         let authorizer = AutomationAuthorizer(
             oauth2: oauth,
             didOpenURL: { url in

@@ -1,6 +1,8 @@
+import Foundation
 import SMART
 import XCTest
 
+@MainActor
 final class LiveServerClientCredentialsTests: XCTestCase {
 
     private static func printResponse(prefix: String, data: Data) {

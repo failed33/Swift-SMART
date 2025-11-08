@@ -20,7 +20,6 @@
 // For additional notes and disclaimer from gematik and in case of changes by gematik find details in the "Readme" file.
 //
 
-import Combine
 import Foundation
 
 // swiftlint:disable large_tuple
@@ -31,10 +30,11 @@ public typealias HTTPResponse = (data: Data, response: HTTPURLResponse, status: 
 /// - Parameter original: the original response with a redirect status
 /// - Parameter redirect: the pre-composed URLRequest that follows the redirect
 /// - Parameter completionHandler: the function that takes the newRequest to follow or nil to not follow the redirect
-public typealias RedirectHandler = (
-    _ original: HTTPURLResponse,
-    _ redirect: URLRequest
-) async -> URLRequest?
+public typealias RedirectHandler =
+    @Sendable (
+        _ original: HTTPURLResponse,
+        _ redirect: URLRequest
+    ) async -> URLRequest?
 
 // swiftlint:enable large_tuple
 
@@ -45,18 +45,6 @@ public protocol HTTPClient {
     /// - Parameter request: The request to be (modified and) sent.
     /// - Parameter interceptors: per request interceptors.
     /// - Parameter handler: handler that should be called in case of redirect.
-    /// - Returns: `AnyPublisher` that emits a response as `HTTPResponse`
-    @available(*, deprecated, message: "Use async version instead")
-    func sendPublisher(request: URLRequest, interceptors: [Interceptor], redirect handler: RedirectHandler?)
-        -> AnyPublisher<HTTPResponse, HTTPClientError>
-
-    /// Send the given request. The request will be processed by the list of `Interceptors`.
-    ///
-    /// - Parameter request: The request to be (modified and) sent.
-    /// - Parameter interceptors: per request interceptors.
-    /// - Parameter handler: handler that should be called in case of redirect.
-    /// - Note: Only `HTTPClientError`s are supposed to be thrown.
-    /// - Returns: The response as `HTTPResponse`
     func sendAsync(
         request: URLRequest,
         interceptors: [Interceptor],
@@ -72,48 +60,11 @@ extension HTTPClient {
     ///
     /// - Parameter request: The request to be (modified and) sent.
     /// - Parameter interceptors: per request interceptors.
-    /// - Parameter handler: handler that should be called in case of redirect.
-    /// - Returns: `AnyPublisher` that emits a response as `HTTPResponse`
-    @available(
-        *,
-        deprecated,
-        renamed: "sendPublisher(request:interceptors:redirect:)",
-        message: "Use async version instead"
-    )
-    func send(request: URLRequest, interceptors: [Interceptor], redirect handler: RedirectHandler?)
-        -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        sendPublisher(request: request, interceptors: interceptors, redirect: handler)
-    }
-}
-
-extension HTTPClient {
-    /// Send the given request. The request will be processed by the list of `Interceptors`.
-    ///
-    /// - Parameter request: The request to be (modified and) sent.
-    /// - Parameter interceptors: per request interceptors.
-    /// - Returns: `AnyPublisher` that emits a response as `HTTPResponse`
-    @available(*, deprecated, message: "Use async version instead")
-    public func sendPublisher(request: URLRequest,
-                              interceptors: [Interceptor]) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        send(request: request, interceptors: interceptors, redirect: nil)
-    }
-
-    /// Send the given request.
-    ///
-    /// - Parameter request: The request to be (modified and) sent.
-    /// - Returns: `AnyPublisher` that emits a response as `HTTPResponse`
-    @available(*, deprecated, message: "Use async version instead")
-    public func sendPublisher(request: URLRequest) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        sendPublisher(request: request, interceptors: [])
-    }
-
-    /// Send the given request. The request will be processed by the list of `Interceptors`.
-    ///
-    /// - Parameter request: The request to be (modified and) sent.
-    /// - Parameter interceptors: per request interceptors.
     /// - Note: Only `HTTPClientError`s are supposed to be thrown.
     /// - Returns: The response as `HTTPResponse`
-    public func sendAsync(request: URLRequest, interceptors: [Interceptor]) async throws -> HTTPResponse {
+    public func sendAsync(request: URLRequest, interceptors: [Interceptor]) async throws
+        -> HTTPResponse
+    {
         try await sendAsync(request: request, interceptors: interceptors, redirect: nil)
     }
 
@@ -149,33 +100,39 @@ public enum HTTPClientError: Swift.Error, Equatable, LocalizedError {
     /// Unclassified error
     case unknown(Swift.Error)
 
-    public static func ==(lhs: HTTPClientError, rhs: HTTPClientError) -> Bool {
+    public static func == (lhs: HTTPClientError, rhs: HTTPClientError) -> Bool {
         switch (lhs, rhs) {
-        case let (.internalError(lhsInternal), .internalError(rhsInternal)): return lhsInternal == rhsInternal
-        case let (.httpError(lhsError), .httpError(rhsError)): return lhsError.errorCode == rhsError.errorCode
-        case let (.networkError(lhsError), .networkError(rhsError)): return lhsError == rhsError
+        case (.internalError(let lhsInternal), .internalError(let rhsInternal)):
+            return lhsInternal == rhsInternal
+        case (.httpError(let lhsError), .httpError(let rhsError)):
+            return lhsError.errorCode == rhsError.errorCode
+        case (.networkError(let lhsError), .networkError(let rhsError)): return lhsError == rhsError
         // We must compair the raw error in this context since the `LocalizedError` description
         // can be part of a extension outside the scope of the HTTPClient package
-        case let (.authentication(lhsError), .authentication(rhsError)):
+        case (.authentication(let lhsError), .authentication(let rhsError)):
             let lhsNSError = lhsError as NSError
             let rhsNSError = rhsError as NSError
             return lhsNSError.code == rhsNSError.code && lhsNSError.domain == rhsNSError.domain
-        case let (.vauError(lhsError), .vauError(rhsError)): return lhsError.localizedDescription == rhsError
-            .localizedDescription
-        case let (.unknown(lhsError), .unknown(rhsError)): return lhsError.localizedDescription == rhsError
-            .localizedDescription
+        case (.vauError(let lhsError), .vauError(let rhsError)):
+            return lhsError.localizedDescription
+                == rhsError
+                .localizedDescription
+        case (.unknown(let lhsError), .unknown(let rhsError)):
+            return lhsError.localizedDescription
+                == rhsError
+                .localizedDescription
         default: return false
         }
     }
 
     public var errorDescription: String? {
         switch self {
-        case let .internalError(string): return string
-        case let .httpError(urlError): return urlError.localizedDescription
-        case let .networkError(errorString): return errorString
-        case let .authentication(error): return error.localizedDescription
-        case let .vauError(error): return error.localizedDescription
-        case let .unknown(error): return error.localizedDescription
+        case .internalError(let string): return string
+        case .httpError(let urlError): return urlError.localizedDescription
+        case .networkError(let errorString): return errorString
+        case .authentication(let error): return error.localizedDescription
+        case .vauError(let error): return error.localizedDescription
+        case .unknown(let error): return error.localizedDescription
         }
     }
 }
@@ -183,7 +140,7 @@ public enum HTTPClientError: Swift.Error, Equatable, LocalizedError {
 /// HTTP Status codes
 public enum HTTPStatusCode: Int {
     // success
-    case ok = 200 // swiftlint:disable:this identifier_name
+    case ok = 200  // swiftlint:disable:this identifier_name
     case created = 201
     case accepted = 202
     case noContent = 204
@@ -258,7 +215,7 @@ public enum HTTPMethod: String {
 extension HTTPStatusCode {
     /// Response status code is in the range of 200..<300
     public var isSuccessful: Bool {
-        200 ..< 300 ~= rawValue
+        200..<300 ~= rawValue
     }
 
     /// Response status code that indicates an empty body
@@ -268,6 +225,6 @@ extension HTTPStatusCode {
 
     /// Response status code is in the range of 300..<400
     public var isRedirect: Bool {
-        300 ..< 400 ~= rawValue
+        300..<400 ~= rawValue
     }
 }
