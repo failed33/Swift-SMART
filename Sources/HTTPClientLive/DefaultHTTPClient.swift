@@ -172,11 +172,12 @@ extension DefaultHTTPClient {
                 return
             }
 
-            // Only bypass certificate validation for localhost
-            guard
-                let host = challenge.protectionSpace.host.lowercased().split(separator: ".").first,
-                host == "localhost" || host == "127"
-            else {
+            // Only bypass certificate validation for localhost-style hosts
+            let host = challenge.protectionSpace.host.lowercased()
+            let isLoopbackHost = host == "localhost" || host == "127.0.0.1" || host == "::1"
+            let isLocalhostAlias = host.hasSuffix(".localhost")
+
+            guard isLoopbackHost || isLocalhostAlias else {
                 completionHandler(.performDefaultHandling, nil)
                 return
             }
