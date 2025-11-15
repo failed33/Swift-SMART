@@ -65,7 +65,7 @@ public struct SMARTConfiguration: Codable {
 }
 
 // Sources/Client/Server.swift
-func getSMARTConfiguration(forceRefresh: Bool, completion: @escaping (Result<SMARTConfiguration, Error>) -> Void)
+func getSMARTConfiguration(forceRefresh: Bool = false) async throws -> SMARTConfiguration
 ```
 
 **Status:** ✅ Implements async fetch, caching, and parsing per spec
@@ -129,12 +129,11 @@ func configure(withSettings settings: OAuth2JSON) {
 open func handleEHRLaunch(
     iss: String,
     launch: String,
-    additionalSettings: OAuth2JSON? = nil,
-    completion: @escaping (Error?) -> Void
-) {
+    additionalSettings: OAuth2JSON? = nil
+) async throws {
     // Validates issuer URL
     // Merges additional settings
-    // Calls server.ready() to fetch SMART configuration
+    // Awaits server.ready() to fetch SMART configuration
     // Stores launch parameter for auth request
     // Sets granularity to launchContext if needed
 }
@@ -167,7 +166,6 @@ oauth.authorize(params: params) { parameters, error in
 ```swift
 // Sources/Client/Client.swift
 open func authorize(callback: @escaping (_ patient: Patient?, _ error: Error?) -> Void) {
-    server.mustAbortAuthorization = false
     server.authorize(with: self.authProperties, callback: callback)
 }
 
@@ -300,7 +298,9 @@ final class OAuth2BearerInterceptor: Interceptor {
 
     func interceptAsync(chain: Chain) async throws -> HTTPResponse {
         var request = chain.request
-        if let token = auth?.oauth?.accessToken, !token.isEmpty {
+        if let auth,
+           let token = await auth.accessToken(),
+           !token.isEmpty {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
         return try await chain.proceedAsync(request: request)
@@ -340,17 +340,17 @@ init(...) {
     )
 }
 
-func fetchPatient(id: String, completion: @escaping (Result<ModelsR5.Patient, Error>) -> Void) {
+public func readPatient(id: String) async throws -> ModelsR5.Patient {
     let operation = DecodingFHIRRequestOperation<ModelsR5.Patient>(
         path: "Patient/\(id)",
         headers: ["Accept": "application/fhir+json"]
     )
-    // ... executes via fhirClient
+    return try await fhirClient.execute(operation: operation)
 }
 
 // Sources/Client/Client.swift
-open func getJSON(at path: String, completion: @escaping (Result<FHIRClient.Response, Error>) -> Void)
-open func getData(from url: URL, accept: String, completion: @escaping (Result<FHIRClient.Response, Error>) -> Void)
+open func getJSON(at path: String) async throws -> FHIRClient.Response
+open func getData(from url: URL, accept: String) async throws -> FHIRClient.Response
 ```
 
 **Status:** ✅ Complete FHIR API access with typed operations
@@ -500,10 +500,10 @@ extension Patient {
 
 ### Supported Operations
 
-- **Read**: `server.fetchPatient(id:completion:)` → `ModelsR5.Patient`
+- **Read**: `try await server.readPatient(id:)` → `ModelsR5.Patient`
 - **Search**: `PatientListQuery` with pagination via `Bundle.link[rel=next]`
-- **Generic GET**: `client.getJSON(at:completion:)` → raw JSON response
-- **Generic data fetch**: `client.getData(from:accept:completion:)` → raw data
+- **Generic GET**: `try await client.getJSON(at:)` → raw JSON response
+- **Generic data fetch**: `try await client.getData(from:accept:)` → raw data
 
 ### Operation Pattern
 
@@ -553,115 +553,5 @@ All FHIR operations use:
 ### Known Limitations
 
 1. **CapabilityStatement parsing removed** - Now uses `.well-known` exclusively; old `fromCapabilitySecurity` initializer remains for backward compat but should be deprecated
-2. **No Resource.read() static methods** - Old Swift-FHIR pattern removed; use `server.fetchPatient()` or define custom operations
-3. **Threading helper is basic** - `callOnMainThread()` is simple; may need refinement for complex async scenarios
-4. **Concurrency model** - Mix of Combine (FHIRClient) and callbacks (Auth/Server); future versions could unify around async/await
-
----
-
-## Build Status
-
-```bash
-$ swift build
-# Build complete! (1.76s)
-# ✅ Zero errors
-# ⚠️  Warnings about unhandled files in HTTPClient/FHIRClient targets (expected; they're separate modules)
-```
-
----
-
-## Public API Surface
-
-### Client Initialization
-
-```swift
-import SMART
-
-let client = Client(
-    baseURL: URL(string: "https://fhir.example.org")!,
-    settings: [
-        "client_id": "my-app-id",
-        "redirect": "myapp://callback",
-        "scope": "patient/*.rs offline_access openid fhirUser"
-    ]
-)
-```
-
-### EHR Launch
-
-```swift
-// App receives iss and launch from EHR
-client.handleEHRLaunch(iss: issuer, launch: launchToken) { error in
-    guard error == nil else { return }
-    client.authorize { patient, error in
-        // Authorized; patient context established
-    }
-}
-```
-
-### Standalone Launch
-
-```swift
-client.authorize { patient, error in
-    guard let patient else { return }
-    // Patient selected during auth; now access FHIR API
-}
-```
-
-### FHIR API Access
-
-```swift
-client.server.fhirClient.execute(operation: myOperation)
-    .sink(receiveCompletion: { completion in
-        // handle completion
-    }, receiveValue: { result in
-        // handle result
-    })
-```
-
----
-
-## Testing Recommendations
-
-### Unit Tests Needed
-
-1. PKCE code challenge generation/verification
-2. SMARTConfiguration JSON parsing (with/without optional fields)
-3. LaunchContext parsing from OAuth token response
-4. Scope normalization (v1→v2 syntax)
-5. Extension filtering (`Element.extensions(for:)`)
-
-### Integration Tests Needed
-
-1. `.well-known/smart-configuration` fetch and parse
-2. Full EHR launch flow (mock iss/launch)
-3. Full standalone launch flow
-4. Token refresh
-5. Patient search with pagination
-6. Bearer token injection in requests
-
-### End-to-End Tests Needed
-
-1. Against public SMART sandbox (https://launch.smarthealthit.org) — automated via `scripts/test_scripts/standalone_launch.sh`
-2. EHR launch from simulated EHR (stubbed in `Tests/E2E/EHRLaunchTests.swift`)
-3. Standalone launch with patient selection (`Tests/E2E/StandaloneLaunchTests.swift` SA-01)
-4. Refresh token usage (`StandaloneLaunchTests` SA-06)
-
----
-
-## Conclusion
-
-✅ **Implementation is COMPLETE and COMPLIANT with SMART App Launch 2.2**
-
-The Swift-SMART library now:
-
-- Fully supports FHIR R5 via Apple's ModelsR5
-- Implements `.well-known/smart-configuration` discovery
-- Supports PKCE (S256) for all authorization code flows
-- Handles both EHR and Standalone launches
-- Parses complete launch context from token responses
-- Uses modern SMART 2.0 scope syntax with v1 compatibility
-- Provides FHIRClient-based API access with OAuth2 bearer tokens
-- Works with iOS patient selection UI updated for R5
-
-The migration from Swift-FHIR to ModelsR5 + HTTPClient/FHIRClient is complete, and all deprecated code has been removed.
+2. **No Resource.read() static methods** - Old Swift-FHIR pattern removed; use `server.readPatient(id:)` or define custom operations
+3. **Threading helper is basic** - `

@@ -102,3 +102,7 @@ struct DecodingFHIRRequestOperation<Decoded: Decodable>: FHIRClientOperation {
         }
     }
 }
+
+extension RawFHIRRequestOperation: @unchecked Sendable {}
+
+extension DecodingFHIRRequestOperation: @unchecked Sendable {}

@@ -24,7 +24,7 @@ import Combine
 import Foundation
 import HTTPClient
 
-class URLRequestChain: Chain {
+final class URLRequestChain: Chain, @unchecked Sendable {
     var request: URLRequest
     private let session: URLSession
     private let interceptors: [Interceptor]
@@ -33,17 +33,6 @@ class URLRequestChain: Chain {
         self.session = session
         self.request = request
         self.interceptors = interceptors
-    }
-
-    func proceedPublisher(request newRequest: URLRequest) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        guard let interceptor = interceptors.first else {
-            // interceptors is empty
-            request = newRequest
-            return session.dataTaskPublisher(for: newRequest).mapToHTTPResponse()
-        }
-        request = newRequest
-        let nextChain = URLRequestChain(request: newRequest, session: session, with: Array(interceptors.dropFirst()))
-        return interceptor.interceptPublisher(chain: nextChain)
     }
 
     func proceedAsync(request newRequest: URLRequest) async throws -> HTTPResponse {
@@ -68,27 +57,49 @@ class URLRequestChain: Chain {
                 throw HTTPClientError.internalError("URLResponse is not a HTTPURLResponse")
             }
             guard let statusCode = HTTPStatusCode(rawValue: httpResponse.statusCode) else {
-                throw HTTPClientError.internalError("Unsupported http status code [\(httpResponse.statusCode)]")
+                throw HTTPClientError.internalError(
+                    "Unsupported http status code [\(httpResponse.statusCode)]")
             }
             return (data: data, response: httpResponse, status: statusCode)
         }
     }
 }
 
-extension Publisher where Output == (data: Data, response: URLResponse), Failure == URLError {
-    func mapToHTTPResponse() -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        tryMap { data, response in
-            guard let httpResponse = response as? HTTPURLResponse else {
-                throw HTTPClientError.internalError("URLResponse is not a HTTPURLResponse")
+extension URLRequestChain {
+    func proceedPublisher(request newRequest: URLRequest) -> AnyPublisher<
+        HTTPResponse, HTTPClientError
+    > {
+        Deferred {
+            Future { promise in
+                let promiseBox = HTTPResponsePromiseBox(promise)
+                _Concurrency.Task {
+                    do {
+                        let response = try await self.proceedAsync(request: newRequest)
+                        promiseBox.succeed(with: response)
+                    } catch let error as HTTPClientError {
+                        promiseBox.fail(with: error)
+                    } catch {
+                        promiseBox.fail(with: error.asHTTPClientError())
+                    }
+                }
             }
-            guard let statusCode = HTTPStatusCode(rawValue: httpResponse.statusCode) else {
-                throw HTTPClientError.internalError("Unsupported http status code [\(httpResponse.statusCode)]")
-            }
-            return (data: data, response: httpResponse, status: statusCode)
-        }
-        .mapError { error in
-            error.asHTTPClientError()
         }
         .eraseToAnyPublisher()
+    }
+}
+
+private final class HTTPResponsePromiseBox: @unchecked Sendable {
+    private let promise: Future<HTTPResponse, HTTPClientError>.Promise
+
+    init(_ promise: @escaping Future<HTTPResponse, HTTPClientError>.Promise) {
+        self.promise = promise
+    }
+
+    func succeed(with response: HTTPResponse) {
+        promise(.success(response))
+    }
+
+    func fail(with error: HTTPClientError) {
+        promise(.failure(error))
     }
 }

@@ -6,9 +6,11 @@
 //  2014, SMART Platforms.
 //
 
+import Foundation
 import SMART
 import XCTest
 
+@MainActor
 final class ClientIntegrationTests: XCTestCase {
     func testClientInitializationUsesNormalizedServerURL() {
         let baseURL = URL(string: "https://api.io")!

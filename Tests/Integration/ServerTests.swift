@@ -6,10 +6,12 @@
 //  2014, SMART Health IT.
 //
 
+import Foundation
 import XCTest
 
 @testable import SMART
 
+@MainActor
 final class ServerIntegrationTests: XCTestCase {
     func testServerInitializationNormalizesAudience() {
         let server = Server(baseURL: URL(string: "https://api.io")!)

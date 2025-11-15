@@ -52,7 +52,7 @@ It is assuming that you don't have a `client_id` and on first authentication wil
 If you know your client-id you can specify it in the settings dict.
 The app must also register the `redirect` URL scheme so it can be notified when authentication completes.
 
-```swift
+````swift
 import SMART
 
 // create the client
@@ -78,9 +78,6 @@ Task {
     }
 }
 
-> Prefer callbacks? The legacy `authorize(callback:)` and `getJSON(..., completion:)` wrappers remain available (deprecated) and now return `Task` handles so you can cancel them.
-```
-
 For authorization to work with Safari/SFViewController, you also need to:
 
 1. register the scheme (such as `smartapp` in the example here) in your app's `Info.plist` and
@@ -99,7 +96,18 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return false
     }
 }
-```
+````
+
+### Migrating from callback-based APIs
+
+Swift-SMART now embraces Swift's structured concurrency model. When upgrading from earlier releases:
+
+- Call `try await client.authorize()` instead of supplying a callback. The former callback API still exists but is deprecated and simply wraps the new async entry point in a `Task`.
+- Inject an `AuthUIHandler` when you need custom UI presentation. Platform defaults (`iOSAuthUIHandler`, `macOSAuthUIHandler`) are provided, and tests can depend on `MockAuthUIHandler` from `Tests/Mocks`.
+- Interact with `Auth` via async helpers such as `await auth.handleRedirect(_:)` and `await auth.reset()`; their blocking counterparts remain only as deprecated shims for legacy integrations.
+- Ensure any custom interceptors or helpers use `@Sendable` closures when capturing state across tasks to satisfy Swift 6 strict concurrency checks.
+
+These changes eliminate data races by isolating mutable OAuth state inside the new `AuthCore` actor, and make it explicit where UI code must hop to the `MainActor`.
 
 ## Installation
 
@@ -144,6 +152,16 @@ scripts/test_scripts/standalone_launch.sh
 ````
 
 Set `SMART_AUTOMATION_ENDPOINT` if you have an automation worker (e.g., Playwright) listening for authorize URLs and driving the login form. Otherwise the script opens the system browser for manual interaction.
+
+- To validate EHR/context-aware launches end-to-end, configure the new harness:
+
+```bash
+cp scripts/test_scripts/ehr_launch/ehr_launch.env.example scripts/test_scripts/ehr_launch/ehr_launch.env
+# Populate SMART_* and SMART_EHR_* values, then run:
+scripts/test_scripts/ehr_launch/ehr_launch.sh
+```
+
+The script first signs in as the EMR practitioner, posts the launch context to Keycloak (using `Tests/Fixtures/launch-context.json` as a template for all optional fields), and finally runs the `EHRLaunchTests` suite to perform the SMART launch and patient read.
 
 - To run the manual OAuth checklist (authorization_code), set:
 

@@ -20,7 +20,6 @@
 // For additional notes and disclaimer from gematik and in case of changes by gematik find details in the "Readme" file.
 //
 
-import Combine
 import Foundation
 import HTTPClient
 import OSLog
@@ -38,7 +37,9 @@ public class LoggingInterceptor: Interceptor {
         func log(request: URLRequest) {
             if rawValue > 0 {
                 Logger.httpClient
-                    .debug(">> [\(request.httpMethod ?? "NO-METHOD")] \(request.url?.absoluteString ?? "NO-URL")")
+                    .debug(
+                        ">> [\(request.httpMethod ?? "NO-METHOD")] \(request.url?.absoluteString ?? "NO-URL")"
+                    )
             }
             if rawValue > 1 {
                 Logger.httpClient.debug(">> [Headers]: \(request.allHTTPHeaderFields ?? [:])")
@@ -84,32 +85,16 @@ public class LoggingInterceptor: Interceptor {
         self.level = level
     }
 
-    public func interceptPublisher(chain: Chain) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        #if DEBUG
-        let request = chain.request
-        level.log(request: request)
-        let logger = self
-        return chain.proceedPublisher(request: request)
-            .map { response in
-                logger.level.log(response: response)
-                return response
-            }
-            .eraseToAnyPublisher()
-        #else
-        return chain.proceed(request: chain.request)
-        #endif
-    }
-
     public func interceptAsync(chain: Chain) async throws -> HTTPResponse {
         #if DEBUG
-        let request = chain.request
-        level.log(request: request)
-        let logger = self
-        let response = try await chain.proceedAsync(request: request)
-        logger.level.log(response: response)
-        return response
+            let request = chain.request
+            level.log(request: request)
+            let logger = self
+            let response = try await chain.proceedAsync(request: request)
+            logger.level.log(response: response)
+            return response
         #else
-        return try await chain.proceedAsync(request: chain.request)
+            return try await chain.proceedAsync(request: chain.request)
         #endif
     }
 }

@@ -1,9 +1,11 @@
+import Foundation
 import HTTPClient
-import ModelsR5
+@preconcurrency import ModelsR5
 import XCTest
 
 @testable import SMART
 
+@MainActor
 final class FHIROperationsTests: XCTestCase {
     private func makeServer(using httpClient: MockHTTPClient) -> Server {
         Server(baseURL: URL(string: "https://example.org/fhir/")!, httpClient: httpClient)
@@ -19,7 +21,7 @@ final class FHIROperationsTests: XCTestCase {
 
         let operation = DecodingFHIRRequestOperation<ModelsR5.Patient>(path: "Patient/example")
 
-        let patient = try await server.fhirClient.execute(operation: operation)
+        let patient = try await server.execute(operation)
 
         XCTAssertEqual(patient.id?.value?.string, "example")
         XCTAssertEqual(httpClient.requestCount(for: requestURL.path), 1)
@@ -41,7 +43,7 @@ final class FHIROperationsTests: XCTestCase {
             body: payload
         )
 
-        let response = try await server.fhirClient.execute(operation: operation)
+        let response = try await server.execute(operation)
 
         XCTAssertEqual(response.status, .created)
 
@@ -99,14 +101,14 @@ final class FHIROperationsTests: XCTestCase {
         let requestURL = URL(string: "https://example.org/fhir/Patient/example")!
         httpClient.setResponse(for: requestURL, data: data)
 
-        let task = _Concurrency.Task {
-            try await server.readPatient(id: "example")
+        let task = _Concurrency.Task<Void, Error> { @MainActor in
+            let _: ModelsR5.Patient = try await server.readPatient(id: "example")
         }
 
         task.cancel()
 
         do {
-            _ = try await task.value
+            try await task.value
             XCTFail("Expected task to throw CancellationError")
         } catch is CancellationError {
             // expected cancellation

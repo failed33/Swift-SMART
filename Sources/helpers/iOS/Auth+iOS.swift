@@ -7,84 +7,194 @@
 //
 
 // TODO: This uses the old UIKit framework, we need to migrate to the new SwiftUI framework, especially since the old shenanigans with ViewControlers are highly unreliable. iOS 26 introduced some new embedded browsing feature we need to look up and then implement an auth flow via that interface.
+import _Concurrency
 
 #if os(iOS)
+	import AuthenticationServices
 	import UIKit
+	import OAuth2
 
-	extension Auth {
+	@MainActor
+	public final class iOSAuthUIHandler: NSObject, AuthUIHandler,
+		ASWebAuthenticationPresentationContextProviding
+	{
 
-		/**
-		Make the current root view controller the authorization context and show the view controller corresponding to the auth properties.
-		
-		- parameter oauth:      The OAuth2 instance to use for authorization
-		- parameter properties: SMART authorization properties to use
-		- parameter callback:   The callback that is called when authorization completes or fails
-		*/
-		func authorize(
-			with oauth: OAuth2, properties: SMARTAuthProperties,
-			callback: @escaping ((OAuth2JSON?, OAuth2Error?) -> Void)
+		public typealias AnchorProvider = () -> UIWindow?
+
+		private let anchorProvider: AnchorProvider
+		private weak var activePresenter: UIViewController?
+		private var activeSession: ASWebAuthenticationSession?
+
+		public init(
+			anchorProvider: @escaping AnchorProvider = iOSAuthUIHandler.defaultAnchorProvider
 		) {
-			authContext = UIApplication.shared.keyWindow?.rootViewController
+			self.anchorProvider = anchorProvider
+		}
 
-			oauth.authConfig.authorizeContext = authContext
-			oauth.authConfig.authorizeEmbedded = properties.embedded
-			oauth.authConfig.authorizeEmbeddedAutoDismiss =
-				properties.granularity != .patientSelectNative
+		// MARK: - AuthUIHandler
 
-			var params: OAuth2StringDict = ["aud": server.aud]
-			if let launch = launchParameter {
-				params["launch"] = launch
-			}
+		public func presentAuthSession(
+			startURL: URL,
+			callbackScheme: String,
+			oauth: OAuth2
+		) async throws -> URL {
+			try await withTaskCancellationHandler {
+				try await withCheckedThrowingContinuation { continuation in
+					Task { @MainActor [weak self] in
+						guard let self else {
+							continuation.resume(throwing: CancellationError())
+							return
+						}
 
-			oauth.authorize(params: params) { parameters, error in
-				if nil != error,
-					properties.granularity == .patientSelectNative,  // not auto-dismissing, must do it ourselves
-					let vc = oauth.authConfig.authorizeContext as? UIViewController
-				{
-					vc.dismiss(animated: true)
+						let session = ASWebAuthenticationSession(
+							url: startURL,
+							callbackURLScheme: callbackScheme
+						) { [weak self] url, error in
+							Task { @MainActor in
+								guard let self else { return }
+								self.activeSession = nil
+								if let url {
+									continuation.resume(returning: url)
+								} else {
+									let underlying = error ?? CancellationError()
+									continuation.resume(throwing: underlying)
+								}
+							}
+						}
+
+						session.presentationContextProvider = self
+						guard session.start() else {
+							continuation.resume(
+								throwing: SMARTError.generic(
+									"Failed to start authentication session."))
+							return
+						}
+
+						self.activeSession = session
+					}
 				}
-				callback(parameters, error)
+			} onCancel: {
+				Task { @MainActor [weak self] in
+					self?.activeSession?.cancel()
+					self?.activeSession = nil
+				}
 			}
 		}
 
-		/**
-		Show the native patient list on the current authContext or the window's root view controller.
-		
-		- parameter withParameters: Additional authorization parameters to pass through
-		*/
-		func showPatientList(withParameters parameters: OAuth2JSON) {
-			guard
-				let root = authContext as? UIViewController
-					?? UIApplication.shared.keyWindow?.rootViewController
-			else {
-				authDidFail(withError: OAuth2Error.invalidAuthorizationContext)
-				return
-			}
+		public func presentPatientSelector(
+			server: Server,
+			parameters: OAuth2JSON,
+			oauth: OAuth2
+		) async throws -> OAuth2JSON {
+			try await withTaskCancellationHandler {
+				try await withCheckedThrowingContinuation { continuation in
+					Task { @MainActor [weak self] in
+						guard let self else {
+							continuation.resume(throwing: CancellationError())
+							return
+						}
 
-			// instantiate patient list view
-			let view = PatientListViewController(list: PatientListAll(), server: self.server)
-			view.title = self.oauth?.authConfig.ui.title
-			let dismiss = #selector(PatientListViewController.dismissFromModal(_:))
-			view.navigationItem.rightBarButtonItem = UIBarButtonItem(
-				barButtonSystemItem: .done, target: view, action: dismiss)
-			view.onPatientSelect = { patient in
-				var params = parameters
-				if let patient = patient {
-					params["patient"] = patient.id
-					params["patient_resource"] = patient
-				}
-				self.processAuthCallback(parameters: params, error: nil)
-			}
+						guard let presenter = self.topPresenter() else {
+							continuation.resume(
+								throwing: OAuth2Error.invalidAuthorizationContext)
+							return
+						}
 
-			// present on root view controller
-			let navi = UINavigationController(rootViewController: view)
-			if nil != root.presentedViewController {  // assumes the login screen is the presented view
-				root.dismiss(animated: false) {
-					root.present(navi, animated: false, completion: nil)
+						let patientList = PatientListViewController(
+							list: PatientListAll(), server: server)
+						patientList.title = oauth.authConfig.ui.title
+						var resumed = false
+
+						patientList.onPatientSelect = { [weak self, weak patientList] patient in
+							Task { @MainActor in
+								guard let self else { return }
+								guard !resumed else { return }
+								resumed = true
+
+								self.activePresenter = nil
+
+								if let patient {
+									var enriched = parameters
+									enriched["patient"] = patient.id
+									enriched["patient_resource"] = patient
+									continuation.resume(returning: enriched)
+								} else {
+									continuation.resume(throwing: CancellationError())
+								}
+
+								if let patientList,
+									patientList.isBeingPresented
+										|| patientList.presentingViewController != nil
+								{
+									patientList.dismiss(animated: true)
+								}
+							}
+						}
+
+						let navigation = UINavigationController(rootViewController: patientList)
+						navigation.modalPresentationStyle = .formSheet
+
+						self.activePresenter = presenter
+						presenter.present(navigation, animated: true, completion: nil)
+					}
 				}
-			} else {
-				root.present(navi, animated: true, completion: nil)
+			} onCancel: {
+				Task { @MainActor [weak self] in
+					self?.activePresenter?.presentedViewController?.dismiss(animated: true)
+					self?.activePresenter = nil
+				}
 			}
+		}
+
+		public func cancelOngoingAuthSession() {
+			activeSession?.cancel()
+			activeSession = nil
+
+			if let presenter = activePresenter, let controller = presenter.presentedViewController {
+				controller.dismiss(animated: true)
+			}
+			activePresenter = nil
+		}
+
+		// MARK: - ASWebAuthenticationPresentationContextProviding
+
+		public func presentationAnchor(for session: ASWebAuthenticationSession)
+			-> ASPresentationAnchor
+		{
+			anchorProvider() ?? ASPresentationAnchor()
+		}
+
+		// MARK: - Helpers
+
+		public static func defaultAnchorProvider() -> UIWindow? {
+			if let keyWindow = UIApplication.shared.connectedScenes
+				.compactMap({ $0 as? UIWindowScene })
+				.flatMap({ $0.windows })
+				.first(where: { $0.isKeyWindow })
+			{
+				return keyWindow
+			}
+			return UIApplication.shared.windows.first(where: { $0.isKeyWindow })
+		}
+
+		private func topPresenter() -> UIViewController? {
+			guard let window = anchorProvider() else { return nil }
+			return topViewController(startingFrom: window.rootViewController)
+		}
+
+		private func topViewController(startingFrom controller: UIViewController?)
+			-> UIViewController?
+		{
+			if let navigation = controller as? UINavigationController {
+				return topViewController(startingFrom: navigation.visibleViewController)
+			}
+			if let tab = controller as? UITabBarController {
+				return topViewController(startingFrom: tab.selectedViewController)
+			}
+			if let presented = controller?.presentedViewController {
+				return topViewController(startingFrom: presented)
+			}
+			return controller
 		}
 	}
 

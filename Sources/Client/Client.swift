@@ -8,9 +8,11 @@
 
 import FHIRClient
 import Foundation
+import ModelsR5
+import OAuth2
 
 /// Describes properties for the authorization flow.
-public struct SMARTAuthProperties {
+public struct SMARTAuthProperties: Sendable {
 
 	/// Whether the client should use embedded view controllers for the auth flow or just redirect to the OS's browser.
 	public var embedded = true
@@ -22,7 +24,7 @@ public struct SMARTAuthProperties {
 }
 
 /// Enum describing the desired granularity of the authorize flow.
-public enum SMARTAuthGranularity {
+public enum SMARTAuthGranularity: Sendable {
 	case tokenOnly
 	case launchContext
 	case patientSelectWeb
@@ -47,6 +49,7 @@ public enum SMARTAuthGranularity {
 ///
 /// There are many other options that you can pass to `settings`, take a look at `init(baseURL:settings:)`. Also see our [programming
 /// guide](https://github.com/smart-on-fhir/Swift-SMART/wiki/Client) for more information.
+@MainActor
 open class Client {
 
 	/// The server this client connects to.
@@ -106,18 +109,6 @@ open class Client {
 	}
 
 	/**
-	Executes the callback immediately if the server is ready to perform requests. Otherwise performs necessary setup operations and
-	requests, like retrieving the conformance statement.
-	
-	- parameter callback: The callback to call if the server is ready or an error has occurred
-	*/
-	@discardableResult
-	@available(*, deprecated, renamed: "ready()")
-	open func ready(callback: @escaping (Error?) -> Void) -> _Concurrency.Task<Void, Never> {
-		server.ready(callback: callback)
-	}
-
-	/**
 	Call this to start the authorization process. Implicitly calls `ready`, so no need to call it yourself.
 	
 	If you use the OS browser you will need to intercept the OAuth redirect in your app delegate and call `didRedirect` yourself. See
@@ -131,24 +122,13 @@ open class Client {
 		return try await server.authorize(with: authProperties)
 	}
 
-	@discardableResult
-	@available(*, deprecated, renamed: "authorize()")
-	open func authorize(callback: @escaping (_ patient: Patient?, _ error: Error?) -> Void)
-		-> _Concurrency.Task<Void, Never>
-	{
-		server.mustAbortAuthorization = false
-		return server.authorize(with: authProperties, callback: callback)
-	}
-
 	open func handleEHRLaunch(
 		iss: String,
 		launch: String,
-		additionalSettings: OAuth2JSON? = nil,
-		completion: @escaping (Error?) -> Void
-	) {
+		additionalSettings: OAuth2JSON? = nil
+	) async throws {
 		guard let issuerURL = URL(string: iss) else {
-			completion(SMARTError.invalidIssuer(iss))
-			return
+			throw SMARTError.invalidIssuer(iss)
 		}
 
 		if issuerURL.absoluteString != server.baseURL.absoluteString {
@@ -159,7 +139,7 @@ open class Client {
 			)
 		}
 
-		if let additionalSettings {
+		if let additionalSettings = additionalSettings {
 			if server.authSettings == nil {
 				server.authSettings = additionalSettings
 			} else {
@@ -169,29 +149,21 @@ open class Client {
 			}
 		}
 
-		server.ready { error in
-			if let error {
-				completion(error)
-				return
-			}
+		try await server.ready()
 
-			guard let auth = self.server.auth else {
-				completion(SMARTError.missingAuthorization)
-				return
-			}
+		guard let auth = server.auth else {
+			throw SMARTError.missingAuthorization
+		}
 
-			auth.launchParameter = launch
-			if self.authProperties.granularity == .tokenOnly {
-				self.authProperties.granularity = .launchContext
-			}
-
-			completion(nil)
+		auth.setLaunchParameter(launch)
+		if authProperties.granularity == .tokenOnly {
+			authProperties.granularity = .launchContext
 		}
 	}
 
 	/// Will return true while the client is waiting for the authorization callback.
 	open var awaitingAuthCallback: Bool {
-		return nil != server.auth?.authCallback
+		return server.auth?.isAwaitingAuthorization() ?? false
 	}
 
 	/**
@@ -233,33 +205,12 @@ open class Client {
 		)
 
 		do {
-			return try await server.fhirClient.execute(operation: operation)
+			return try await server.execute(operation)
 		} catch {
 			if let cancellation = error.cancellationError {
 				throw cancellation
 			}
 			throw mapError(error, forPath: path)
-		}
-	}
-
-	@discardableResult
-	@available(*, deprecated, renamed: "getJSON(at:)")
-	open func getJSON(
-		at path: String,
-		completion: @escaping (Result<FHIRClient.Response, Error>) -> Void
-	) -> _Concurrency.Task<Void, Never> {
-		_Concurrency.Task {
-			do {
-				let response = try await getJSON(at: path)
-				server.scheduleOnReceiveQueue {
-					completion(.success(response))
-				}
-			} catch {
-				let finalError = error.cancellationError ?? error
-				server.scheduleOnReceiveQueue {
-					completion(.failure(finalError))
-				}
-			}
 		}
 	}
 
@@ -278,34 +229,12 @@ open class Client {
 		)
 
 		do {
-			return try await server.fhirClient.execute(operation: operation)
+			return try await server.execute(operation)
 		} catch {
 			if let cancellation = error.cancellationError {
 				throw cancellation
 			}
 			throw mapError(error, forPath: path)
-		}
-	}
-
-	@discardableResult
-	@available(*, deprecated, renamed: "getData(from:accept:)")
-	open func getData(
-		from url: URL,
-		accept: String,
-		completion: @escaping (Result<FHIRClient.Response, Error>) -> Void
-	) -> _Concurrency.Task<Void, Never> {
-		_Concurrency.Task {
-			do {
-				let response = try await getData(from: url, accept: accept)
-				server.scheduleOnReceiveQueue {
-					completion(.success(response))
-				}
-			} catch {
-				let finalError = error.cancellationError ?? error
-				server.scheduleOnReceiveQueue {
-					completion(.failure(finalError))
-				}
-			}
 		}
 	}
 

@@ -1,6 +1,9 @@
-@testable import SMART
+import Foundation
 import XCTest
 
+@testable import SMART
+
+@MainActor
 final class AuthPerformanceTests: XCTestCase {
     func testPKCEGenerationPerformance() {
         measure {
@@ -10,7 +13,14 @@ final class AuthPerformanceTests: XCTestCase {
 
     func testScopeNormalizationPerformance() {
         let server = Server(baseURL: URL(string: "https://example.org/fhir")!)
-        let auth = Auth(type: .codeGrant, server: server, settings: nil)
+        let auth = Auth(
+            type: .codeGrant,
+            server: server,
+            aud: server.aud,
+            initialLogger: nil,
+            settings: nil,
+            uiHandler: TestAuthUIHandler()
+        )
         var properties = SMARTAuthProperties()
         properties.granularity = .patientSelectNative
 
@@ -22,4 +32,3 @@ final class AuthPerformanceTests: XCTestCase {
         }
     }
 }
-

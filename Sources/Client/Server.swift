@@ -12,26 +12,51 @@ import HTTPClient
 import HTTPClientLive
 import ModelsR5
 import OAuth2
+import _Concurrency
 
-open class Server {
+#if canImport(AppKit)
+	import AppKit
+#endif
+
+@MainActor
+public final class Server {
 	public let baseURL: URL
 	public let aud: String
 
+	private struct SendableBox<Value>: @unchecked Sendable {
+		let value: Value
+
+		init(_ value: Value) {
+			self.value = value
+		}
+	}
+
 	public private(set) var name: String?
+
+	private static func makeDefaultAuthUIHandler() -> AuthUIHandler {
+		#if os(iOS)
+			return iOSAuthUIHandler()
+		#elseif os(macOS)
+			// TODO: Implement macOSAuthUIHandler
+			// return macOSAuthUIHandler(anchorProvider: {
+			// 	@MainActor in NSFontPanel.shared.sheetParent
+			// })
+			return NoUIAuthHandler()
+		#else
+			return NoUIAuthHandler()
+		#endif
+	}
 
 	var auth: Auth? {
 		didSet {
 			oauthInterceptor.auth = auth
 			authRefreshInterceptor?.auth = auth
 
-			if let oauth: OAuth2 = auth?.oauth {
-				oauth.onBeforeDynamicClientRegistration = onBeforeDynamicClientRegistration
-				if let logger = logger {
-					oauth.logger = logger
-				}
-			}
-
 			if let auth {
+				let handler = onBeforeDynamicClientRegistration
+				let currentLogger = logger
+				auth.updateDynamicClientRegistration(handler)
+				auth.updateLogger(currentLogger)
 				logger?.debug(
 					"SMART", msg: "Initialized server auth of type “\(auth.type.rawValue)”")
 			}
@@ -45,24 +70,28 @@ open class Server {
 	}
 
 	public var idToken: String? {
-		auth?.oauth?.idToken
+		guard let auth else { return nil }
+		return auth.idToken()
 	}
 
 	public var refreshToken: String? {
-		auth?.oauth?.refreshToken
+		guard let auth else { return nil }
+		return auth.refreshTokenValue()
 	}
 
-	open var onBeforeDynamicClientRegistration: ((URL) -> OAuth2DynReg)? {
+	public var onBeforeDynamicClientRegistration: (@Sendable (URL) -> OAuth2DynReg)? {
 		didSet {
-			if let oauth = auth?.oauth {
-				oauth.onBeforeDynamicClientRegistration = onBeforeDynamicClientRegistration
-			}
+			guard let auth else { return }
+			let handler = onBeforeDynamicClientRegistration
+			auth.updateDynamicClientRegistration(handler)
 		}
 	}
 
-	open var logger: OAuth2Logger? {
+	public var logger: OAuth2Logger? {
 		didSet {
-			auth?.oauth?.logger = logger
+			guard let auth else { return }
+			let currentLogger = logger
+			auth.updateLogger(currentLogger)
 		}
 	}
 
@@ -78,6 +107,7 @@ open class Server {
 	private let retryInterceptor: RetryInterceptor?
 	private let retryPolicy: RetryPolicy
 	private let httpClient: HTTPClient
+	private let allowInsecureConnections: Bool
 	private let configurationDecoder: JSONDecoder = {
 		JSONDecoder()
 	}()
@@ -89,7 +119,8 @@ open class Server {
 		httpClient: HTTPClient? = nil,
 		receiveQueue: AnySchedulerOf<DispatchQueue> = .main,
 		retryPolicy: RetryPolicy? = nil,
-		additionalInterceptors: [Interceptor] = []
+		additionalInterceptors: [Interceptor] = [],
+		allowInsecureConnections: Bool = false
 	) {
 		baseURL.assertAbsolute()
 
@@ -98,6 +129,7 @@ open class Server {
 		self.aud = baseURL.smartRemovingTrailingSlash()
 		self.authSettings = auth
 		self.receiveQueue = receiveQueue
+		self.allowInsecureConnections = allowInsecureConnections
 
 		self.retryPolicy = retryPolicy ?? RetryPolicy()
 		self.oauthInterceptor = OAuth2BearerInterceptor(auth: nil)
@@ -116,7 +148,8 @@ open class Server {
 			composedInterceptors.append(contentsOf: additionalInterceptors)
 			self.httpClient = DefaultHTTPClient(
 				urlSessionConfiguration: configuration,
-				interceptors: composedInterceptors
+				interceptors: composedInterceptors,
+				allowInsecureConnections: allowInsecureConnections
 			)
 		}
 
@@ -131,35 +164,22 @@ open class Server {
 
 	// MARK: - Discovery
 
-	open func getSMARTConfiguration(forceRefresh: Bool = false) async throws -> SMARTConfiguration {
+	public func getSMARTConfiguration(forceRefresh: Bool = false) async throws -> SMARTConfiguration
+	{
 		let task = await startSMARTConfigurationTask(forceRefresh: forceRefresh)
 		return try await task.value
 	}
 
-	@discardableResult
-	@available(*, deprecated, renamed: "getSMARTConfiguration(forceRefresh:)")
-	open func getSMARTConfiguration(
-		forceRefresh: Bool = false,
-		completion: @escaping (Result<SMARTConfiguration, Error>) -> Void
-	) -> _Concurrency.Task<Void, Never> {
-		let scheduler = receiveQueue
-		return _Concurrency.Task {
-			do {
-				let configuration = try await self.getSMARTConfiguration(forceRefresh: forceRefresh)
-				scheduler.schedule {
-					completion(.success(configuration))
-				}
-			} catch {
-				let finalError = error.cancellationError ?? error
-				scheduler.schedule {
-					completion(.failure(finalError))
-				}
-			}
-		}
+	func setMustAbortAuthorization(_ value: Bool) {
+		mustAbortAuthorization = value
 	}
 
-	private func startSMARTConfigurationTask(forceRefresh: Bool)
-		async -> _Concurrency.Task<SMARTConfiguration, Error>
+	func setLogger(_ newLogger: OAuth2Logger?) {
+		logger = newLogger
+	}
+
+	private func startSMARTConfigurationTask(forceRefresh: Bool) async
+		-> _Concurrency.Task<SMARTConfiguration, Error>
 	{
 		if !forceRefresh, let cached = await configurationCache.cachedConfigurationValue() {
 			return _Concurrency.Task(priority: nil) { cached }
@@ -170,40 +190,46 @@ open class Server {
 		}
 
 		let task = _Concurrency.Task<SMARTConfiguration, Error> {
-			let wellKnownURL = SMARTConfiguration.wellKnownURL(for: self.baseURL)
-			var request = URLRequest(url: wellKnownURL)
-			request.httpMethod = "GET"
-
-			do {
-				let response = try await self.httpClient.sendAsync(
-					request: request,
-					interceptors: []
-				)
-
-				guard (200..<300).contains(response.status.rawValue) else {
-					throw SMARTClientError.configuration(
-						url: wellKnownURL,
-						underlying: SMARTConfigurationError.invalidHTTPStatus(
-							response.status.rawValue)
-					)
-				}
-
-				let rawConfiguration = try self.configurationDecoder.decode(
-					SMARTConfiguration.self,
-					from: response.data
-				)
-				let configuration = self.rewriteSMARTConfigurationIfNeeded(rawConfiguration)
-
-				await self.configurationCache.store(configuration: configuration)
-				return configuration
-			} catch {
-				await self.configurationCache.clearTask()
-				throw SMARTClientError.configuration(url: wellKnownURL, underlying: error)
-			}
+			try await self.fetchSMARTConfiguration()
 		}
 
 		await configurationCache.store(task: task)
 		return task
+	}
+
+	private func fetchSMARTConfiguration() async throws -> SMARTConfiguration {
+		let wellKnownURL = SMARTConfiguration.wellKnownURL(for: baseURL)
+		var request = URLRequest(url: wellKnownURL)
+		request.httpMethod = "GET"
+
+		do {
+			let client = SendableBox(httpClient)
+			let response = try await client.value.sendAsync(
+				request: request,
+				interceptors: []
+			)
+
+			guard (200..<300).contains(response.status.rawValue) else {
+				throw SMARTClientError.configuration(
+					url: wellKnownURL,
+					underlying: SMARTConfigurationError.invalidHTTPStatus(response.status.rawValue)
+				)
+			}
+
+			let rawConfiguration = try configurationDecoder.decode(
+				SMARTConfiguration.self,
+				from: response.data
+			)
+			let configuration = rewriteSMARTConfigurationIfNeeded(rawConfiguration)
+			await configurationCache.store(configuration: configuration)
+			return configuration
+		} catch let error as SMARTClientError {
+			await configurationCache.clearTask()
+			throw error
+		} catch {
+			await configurationCache.clearTask()
+			throw SMARTClientError.configuration(url: wellKnownURL, underlying: error)
+		}
 	}
 
 	private func rewriteSMARTConfigurationIfNeeded(_ configuration: SMARTConfiguration)
@@ -247,7 +273,7 @@ open class Server {
 
 	// MARK: - Readiness
 
-	open func ready() async throws {
+	public func ready() async throws {
 		let configuration = try await getSMARTConfiguration()
 		try ensurePKCES256Support(in: configuration)
 		mergeAuthSettings(with: configuration)
@@ -255,24 +281,6 @@ open class Server {
 		if auth == nil, !instantiateAuthFromAuthSettings() {
 			throw SMARTError.configuration(
 				"Failed to detect the authorization method from SMART configuration")
-		}
-	}
-
-	@discardableResult
-	@available(*, deprecated, renamed: "ready()")
-	open func ready(callback: @escaping (Error?) -> Void) -> _Concurrency.Task<Void, Never> {
-		return _Concurrency.Task {
-			do {
-				try await ready()
-				scheduleOnReceiveQueue {
-					callback(nil)
-				}
-			} catch {
-				let finalError = error.cancellationError ?? error
-				scheduleOnReceiveQueue {
-					callback(finalError)
-				}
-			}
 		}
 	}
 
@@ -307,7 +315,21 @@ open class Server {
 			settings["aud"] = aud
 		}
 
+		if let current = authSettings as NSDictionary?, current.isEqual(to: settings) {
+			return
+		}
+
 		authSettings = settings
+	}
+
+	func mergeAuthSettings(_ additional: OAuth2JSON) {
+		if authSettings == nil {
+			authSettings = additional
+		} else {
+			for (key, value) in additional {
+				authSettings?[key] = value
+			}
+		}
 	}
 
 	/// When running tests against servers that advertise HTTP OAuth endpoints, allow remapping
@@ -369,153 +391,106 @@ open class Server {
 			return false
 		}
 
-		auth = Auth(type: type, server: self, settings: authSettings)
+		auth = Auth(
+			type: type,
+			server: self,
+			aud: aud,
+			initialLogger: logger,
+			settings: authSettings,
+			uiHandler: Server.makeDefaultAuthUIHandler(),
+			allowInsecureConnections: allowInsecureConnections
+		)
 		return true
 	}
 
 	// MARK: - Authorization Flow
 
-	open func authorize(with properties: SMARTAuthProperties) async throws -> Patient? {
+	public func authorize(with properties: SMARTAuthProperties) async throws -> Patient? {
 		try await ready()
-
-		if mustAbortAuthorization {
-			mustAbortAuthorization = false
-			return nil
-		}
 
 		guard let auth else {
 			throw SMARTError.missingAuthorization
 		}
 
 		return try await withTaskCancellationHandler {
-			try await withCheckedThrowingContinuation { continuation in
-				auth.authorize(with: properties) { parameters, error in
-					if self.mustAbortAuthorization {
-						self.mustAbortAuthorization = false
-						continuation.resume(returning: nil)
-						return
-					}
+			let parameters = try await auth.authorize(with: properties)
 
-					if let error {
-						continuation.resume(throwing: error)
-						return
-					}
+			if mustAbortAuthorization {
+				mustAbortAuthorization = false
+				return nil
+			}
 
-					if let patient = parameters?["patient_resource"] as? Patient {
-						continuation.resume(returning: patient)
-						return
-					}
+			if let patient = parameters["patient_resource"] as? Patient {
+				return patient
+			}
 
-					if let patientId = parameters?["patient"] as? String {
-						_Concurrency.Task {
-							do {
-								let patient = try await self.readPatient(id: patientId)
-								self.logger?.debug(
-									"SMART",
-									msg: "Did read patient with result success(\(patientId))")
-								continuation.resume(returning: patient)
-							} catch {
-								self.logger?.debug(
-									"SMART",
-									msg: "Did read patient with result failure(\(error))")
-								continuation.resume(throwing: error)
-							}
-						}
-						return
-					}
-
-					continuation.resume(returning: nil)
+			if let patientReference = parameters["patient"] as? String {
+				let patientId = Server.normalizeResourceId(patientReference)
+				do {
+					let patient = try await readPatient(id: patientId)
+					logger?.debug(
+						"SMART",
+						msg: "Did read patient with result success(\(patientId))")
+					return patient
+				} catch {
+					logger?.debug(
+						"SMART",
+						msg: "Did read patient with result failure(\(error))")
+					throw error
 				}
 			}
+
+			return nil
 		} onCancel: {
-			self.mustAbortAuthorization = true
-			self.auth?.abort()
-		}
-	}
-
-	@discardableResult
-	@available(*, deprecated, renamed: "authorize(with:)")
-	open func authorize(
-		with properties: SMARTAuthProperties,
-		callback: @escaping (_ patient: Patient?, _ error: Error?) -> Void
-	) -> _Concurrency.Task<Void, Never> {
-		return _Concurrency.Task {
-			do {
-				let patient = try await authorize(with: properties)
-				scheduleOnReceiveQueue {
-					callback(patient, nil)
-				}
-			} catch {
-				let finalError = error.cancellationError ?? error
-				scheduleOnReceiveQueue {
-					callback(nil, finalError)
-				}
+			_Concurrency.Task { @MainActor in
+				self.mustAbortAuthorization = true
+				self.auth?.abort()
 			}
 		}
 	}
 
-	open func abort() {
+	public func abort() {
 		mustAbortAuthorization = true
-		auth?.abort()
+		if let auth {
+			auth.abort()
+		}
 	}
 
 	func reset() {
-		abort()
-		auth?.reset()
-	}
-
-	open var authClientCredentials: (id: String, secret: String?, name: String?)? {
-		guard let oauth = auth?.oauth, let clientId = oauth.clientId, !clientId.isEmpty else {
-			return nil
+		mustAbortAuthorization = true
+		if let auth {
+			auth.abort()
+			auth.reset()
 		}
-		return (clientId, oauth.clientSecret, oauth.clientName)
 	}
 
-	open func registerIfNeeded() async throws -> OAuth2JSON? {
+	public var authClientCredentials: (id: String, secret: String?, name: String?)? {
+		guard let auth else { return nil }
+		return auth.clientCredentials()
+	}
+
+	public func registerIfNeeded() async throws -> OAuth2JSON? {
 		try await ready()
-		guard let oauth = auth?.oauth else {
+		guard let auth else {
 			throw SMARTError.missingAuthorization
 		}
 
-		return try await withCheckedThrowingContinuation { continuation in
-			oauth.registerClientIfNeeded { json, error in
-				if let error {
-					continuation.resume(throwing: error)
-					return
-				}
-
-				continuation.resume(returning: json)
-			}
-		}
-	}
-
-	@discardableResult
-	@available(*, deprecated, renamed: "registerIfNeeded()")
-	open func registerIfNeeded(
-		callback: @escaping (_ json: OAuth2JSON?, _ error: Error?) -> Void
-	) -> _Concurrency.Task<Void, Never> {
-		return _Concurrency.Task {
-			do {
-				let json = try await registerIfNeeded()
-				scheduleOnReceiveQueue {
-					callback(json, nil)
-				}
-			} catch {
-				let finalError = error.cancellationError ?? error
-				scheduleOnReceiveQueue {
-					callback(nil, finalError)
-				}
-			}
-		}
+		return try await auth.registerClientIfNeeded()
 	}
 
 	func forgetClientRegistration() {
-		auth?.forgetClientRegistration()
+		if let auth {
+			auth.forgetClientRegistration()
+		}
 		auth = nil
 	}
 
 	func updateLaunchContext(_ context: LaunchContext?) {
 		launchContext = context
+	}
+
+	func execute<T: FHIRClientOperation>(_ operation: T) async throws -> T.Value where T: Sendable {
+		try await fhirClient.execute(operation: operation)
 	}
 
 	func scheduleOnReceiveQueue(_ action: @escaping () -> Void) {
@@ -533,7 +508,8 @@ open class Server {
 		)
 
 		do {
-			return try await fhirClient.execute(operation: operation)
+			let client = SendableBox(fhirClient)
+			return try await client.value.execute(operation: operation)
 		} catch {
 			if let cancellation = error.cancellationError {
 				throw cancellation
@@ -547,28 +523,32 @@ open class Server {
 		try await read(ModelsR5.Patient.self, id: id)
 	}
 
-	@discardableResult
-	@available(*, deprecated, renamed: "readPatient(id:)")
-	func fetchPatient(
-		id: String,
-		completion: @escaping (Result<ModelsR5.Patient, Error>) -> Void
-	) -> _Concurrency.Task<Void, Never> {
-		let scheduler = receiveQueue
-		return _Concurrency.Task {
-			do {
-				let patient = try await readPatient(id: id)
-				scheduler.schedule {
-					completion(.success(patient))
-				}
-			} catch {
-				let finalError = error.cancellationError ?? error
-				scheduler.schedule {
-					completion(.failure(finalError))
-				}
-			}
+}
+
+#if !os(iOS)
+	private struct NoUIAuthHandler: AuthUIHandler {
+		@MainActor
+		func presentAuthSession(
+			startURL: URL,
+			callbackScheme: String,
+			oauth: OAuth2
+		) async throws -> URL {
+			throw SMARTError.generic("Authentication UI is not available on this platform.")
+		}
+
+		@MainActor
+		func cancelOngoingAuthSession() {}
+
+		@MainActor
+		func presentPatientSelector(
+			server: Server,
+			parameters: OAuth2JSON,
+			oauth: OAuth2
+		) async throws -> OAuth2JSON {
+			throw SMARTError.generic("Patient selection UI is not available on this platform.")
 		}
 	}
-}
+#endif
 
 private actor ConfigurationCache {
 	private var cachedConfiguration: SMARTConfiguration?
@@ -593,6 +573,18 @@ private actor ConfigurationCache {
 
 	func clearTask() {
 		runningTask = nil
+	}
+}
+
+// MARK: - Helpers
+
+extension Server {
+	private static func normalizeResourceId(_ reference: String) -> String {
+		guard let slashIndex = reference.lastIndex(of: "/") else {
+			return reference
+		}
+		let start = reference.index(after: slashIndex)
+		return String(reference[start...])
 	}
 }
 

@@ -1,4 +1,4 @@
-// swift-tools-version:5.5
+// swift-tools-version:5.9
 //  Package.swift
 //
 //  Created by Dave Carlson on 8/8/19.
@@ -7,8 +7,10 @@ import PackageDescription
 
 let package = Package(
     name: "SMART",
+
     platforms: [
-        .macOS(.v12), .iOS(.v14),
+        .iOS(.v17),
+        .macOS(.v14),
     ],
     products: [
         .library(
@@ -44,7 +46,12 @@ let package = Package(
             ],
             sources: [
                 "SMART", "Client", "helpers",
-            ]),
+            ],
+            // swiftSettings: [
+            //     .swiftLanguageMode(.v6),
+            //     .enableUpcomingFeature("StrictConcurrency"),
+            //]
+        ),
 
         .target(
             name: "FHIRClient",

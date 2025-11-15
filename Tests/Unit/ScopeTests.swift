@@ -1,10 +1,20 @@
-@testable import SMART
+import Foundation
 import XCTest
 
+@testable import SMART
+
+@MainActor
 final class ScopeTests: XCTestCase {
     private func makeAuth() -> Auth {
         let server = Server(baseURL: URL(string: "https://example.org/fhir")!)
-        return Auth(type: .codeGrant, server: server, settings: nil)
+        return Auth(
+            type: .codeGrant,
+            server: server,
+            aud: server.aud,
+            initialLogger: nil,
+            settings: nil,
+            uiHandler: TestAuthUIHandler()
+        )
     }
 
     func testNormalizationAppliesSMARTv2Requirements() {
@@ -55,4 +65,3 @@ final class ScopeTests: XCTestCase {
         XCTAssertFalse(components.contains("profile"))
     }
 }
-

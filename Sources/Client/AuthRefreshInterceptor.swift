@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import HTTPClient
 import OAuth2
@@ -9,41 +8,25 @@ final class AuthRefreshInterceptor: Interceptor {
 
     private let coordinator: RefreshCoordinator
 
+    @MainActor
     init(
         auth: Auth?,
-        refreshAction: @escaping (Auth) async throws -> Void = AuthRefreshInterceptor.performRefresh
+        refreshAction: @escaping @Sendable (Auth) async throws -> Void = AuthRefreshInterceptor
+            .performRefresh
     ) {
         self.auth = auth
-        self.coordinator = RefreshCoordinator(refreshAction: refreshAction)
-    }
-
-    @available(*, deprecated, message: "Use interceptAsync(chain:) instead")
-    func interceptPublisher(chain: Chain) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        Future { [weak self] promise in
-            guard let self else {
-                promise(.failure(.internalError("Auth reference deallocated")))
-                return
-            }
-
-            _Concurrency.Task {
-                do {
-                    let response = try await self.interceptAsync(chain: chain)
-                    promise(.success(response))
-                } catch let error as HTTPClientError {
-                    promise(.failure(error))
-                } catch {
-                    promise(.failure(.unknown(error)))
-                }
-            }
+        self.coordinator = RefreshCoordinator { auth in
+            try await refreshAction(auth)
         }
-        .eraseToAnyPublisher()
     }
 
     func interceptAsync(chain: Chain) async throws -> HTTPResponse {
         try await process(chain: chain, request: chain.request, hasRetried: false)
     }
 
-    private func process(chain: Chain, request: URLRequest, hasRetried: Bool) async throws -> HTTPResponse {
+    private func process(chain: Chain, request: URLRequest, hasRetried: Bool) async throws
+        -> HTTPResponse
+    {
         let response = try await chain.proceedAsync(request: request)
 
         guard shouldAttemptRefresh(response: response, hasRetried: hasRetried) else {
@@ -60,7 +43,7 @@ final class AuthRefreshInterceptor: Interceptor {
             throw HTTPClientError.authentication(error)
         }
 
-        guard let token = auth.oauth?.accessToken, !token.isEmpty else {
+        guard let token = await MainActor.run(body: { auth.accessToken() }), !token.isEmpty else {
             throw HTTPClientError.authentication(OAuth2Error.noAccessToken)
         }
 
@@ -72,10 +55,11 @@ final class AuthRefreshInterceptor: Interceptor {
 
     private func shouldAttemptRefresh(response: HTTPResponse, hasRetried: Bool) -> Bool {
         guard !hasRetried,
-              response.status == .unauthorized,
-              let header = response.response.value(forHTTPHeaderField: "WWW-Authenticate"),
-              let challenge = parseWWWAuthenticate(header),
-              challenge.scheme.caseInsensitiveCompare("Bearer") == .orderedSame else {
+            response.status == .unauthorized,
+            let header = response.response.value(forHTTPHeaderField: "WWW-Authenticate"),
+            let challenge = parseWWWAuthenticate(header),
+            challenge.scheme.caseInsensitiveCompare("Bearer") == .orderedSame
+        else {
             return false
         }
 
@@ -87,11 +71,12 @@ final class AuthRefreshInterceptor: Interceptor {
     }
 }
 
-private actor RefreshCoordinator {
+@MainActor
+private final class RefreshCoordinator {
     private var currentTask: _Concurrency.Task<Void, Error>?
-    private let refreshAction: (Auth) async throws -> Void
+    private let refreshAction: @Sendable (Auth) async throws -> Void
 
-    init(refreshAction: @escaping (Auth) async throws -> Void) {
+    init(refreshAction: @escaping @Sendable (Auth) async throws -> Void) {
         self.refreshAction = refreshAction
     }
 
@@ -113,24 +98,8 @@ private actor RefreshCoordinator {
 
 extension AuthRefreshInterceptor {
     private static func performRefresh(auth: Auth) async throws {
-        guard let oauth = auth.oauth else {
-            throw OAuth2Error.noAccessToken
-        }
-
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            oauth.tryToObtainAccessTokenIfNeeded { params, error in
-                if let error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                if params != nil || oauth.hasUnexpiredAccessToken() {
-                    continuation.resume(returning: ())
-                } else {
-                    continuation.resume(throwing: OAuth2Error.noRefreshToken)
-                }
-            }
-        }
+        try await auth.refreshAccessToken()
     }
 }
 
+extension AuthRefreshInterceptor: @unchecked Sendable {}

@@ -1,6 +1,7 @@
 import ModelsR5
-@testable import SMART
 import XCTest
+
+@testable import SMART
 
 final class ModelsR5Tests: XCTestCase {
     func testFHIRPrimitiveStringConvenience() {
@@ -27,7 +28,8 @@ final class ModelsR5Tests: XCTestCase {
         let primitive = FHIRPrimitive(FHIRUnsignedInteger(42))
         XCTAssertEqual(primitive.int32, 42)
 
-        let optionalPrimitive: FHIRPrimitive<FHIRUnsignedInteger>? = FHIRPrimitive(FHIRUnsignedInteger(99))
+        let optionalPrimitive: FHIRPrimitive<FHIRUnsignedInteger>? = FHIRPrimitive(
+            FHIRUnsignedInteger(99))
         XCTAssertEqual(optionalPrimitive?.int32, 99)
     }
 
@@ -39,10 +41,12 @@ final class ModelsR5Tests: XCTestCase {
 
         identifier.extension = [ext1, ext2, ext3]
 
-        let filtered: [ModelsR5.Extension] = (identifier as SMART.Element)
+        let filtered: [ModelsR5.Extension] =
+            identifier
             .extensions(forURI: "http://example.org/ext1")
         XCTAssertEqual(filtered.count, 2)
-        XCTAssertTrue(filtered.allSatisfy { $0.url.value?.url.absoluteString == "http://example.org/ext1" })
+        XCTAssertTrue(
+            filtered.allSatisfy { $0.url.value?.url.absoluteString == "http://example.org/ext1" })
     }
 
     func testLocalizedStringBridgesToNSLocalizedString() {
@@ -50,4 +54,3 @@ final class ModelsR5Tests: XCTestCase {
         XCTAssertEqual(key.fhir_localized, NSLocalizedString(key, comment: ""))
     }
 }
-

@@ -1,4 +1,3 @@
-import Combine
 import Foundation
 import HTTPClient
 
@@ -28,31 +27,6 @@ final class MockHTTPClient: HTTPClient {
 
     var mockResponses: [String: ResponseConfiguration] = [:]
 
-    func sendPublisher(
-        request: URLRequest,
-        interceptors: [Interceptor],
-        redirect handler: RedirectHandler?
-    ) -> AnyPublisher<HTTPResponse, HTTPClientError> {
-        Deferred { [weak self] () -> Future<HTTPResponse, HTTPClientError> in
-            Future { promise in
-                guard let strongSelf = self else {
-                    promise(.failure(.internalError("MockHTTPClient deinited")))
-                    return
-                }
-
-                do {
-                    let response = try strongSelf.prepareResponse(for: request)
-                    strongSelf.deliver(response: response, promise: promise)
-                } catch let error as HTTPClientError {
-                    strongSelf.deliver(error: error, promise: promise)
-                } catch {
-                    strongSelf.deliver(error: .unknown(error), promise: promise)
-                }
-            }
-        }
-        .eraseToAnyPublisher()
-    }
-
     func sendAsync(
         request: URLRequest,
         interceptors: [Interceptor],
@@ -61,7 +35,7 @@ final class MockHTTPClient: HTTPClient {
         let response = try prepareResponse(for: request)
         if responseDelay > 0 {
             let nanoseconds = UInt64(responseDelay * 1_000_000_000)
-            try await _Concurrency.Task.sleep(nanoseconds: nanoseconds)
+            try await Task.sleep(nanoseconds: nanoseconds)
         }
         return response
     }
@@ -124,31 +98,4 @@ final class MockHTTPClient: HTTPClient {
         return (configuration.data, httpResponse, status)
     }
 
-    private func deliver(
-        response: HTTPResponse,
-        promise: @escaping (Result<HTTPResponse, HTTPClientError>) -> Void
-    ) {
-        guard responseDelay > 0 else {
-            promise(.success(response))
-            return
-        }
-
-        DispatchQueue.global().asyncAfter(deadline: .now() + responseDelay) {
-            promise(.success(response))
-        }
-    }
-
-    private func deliver(
-        error: HTTPClientError,
-        promise: @escaping (Result<HTTPResponse, HTTPClientError>) -> Void
-    ) {
-        guard responseDelay > 0 else {
-            promise(.failure(error))
-            return
-        }
-
-        DispatchQueue.global().asyncAfter(deadline: .now() + responseDelay) {
-            promise(.failure(error))
-        }
-    }
 }

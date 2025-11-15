@@ -63,15 +63,7 @@ do {
 }
 ```
 
-> The legacy completion-handler version returns a `Task<Void, Never>` for optional cancellation:
->
-> ```swift
-> @discardableResult
-> @available(*, deprecated, renamed: "authorize()")
-> open func authorize(
->     callback: @escaping (_ patient: ModelsR5.Patient?, _ error: Error?) -> Void
-> ) -> Task<Void, Never>
-> ```
+> **Legacy API:** `open func authorize(callback: (ModelsR5.Patient?, Error?) -> Void)` remains available but is deprecated. Internally it wraps the async method in a `Task` and invokes the callback on the main actor.
 
 ##### **EHR Launch**
 
@@ -79,8 +71,7 @@ do {
 open func handleEHRLaunch(
     iss: String,
     launch: String,
-    additionalSettings: OAuth2JSON? = nil,
-    completion: @escaping (Error?) -> Void
+    additionalSettings: OAuth2JSON? = nil
 )
 ```
 
@@ -90,15 +81,8 @@ Call this before `authorize(...)` to ensure the subsequent authorization request
 **Example:**
 
 ```swift
-// App receives iss and launch from URL params
-client.handleEHRLaunch(iss: issuer, launch: launchToken) { error in
-    guard error == nil else { return }
-
-    // Now call authorize to complete the flow
-    client.authorize { patient, error in
-        // Authorized with EHR-provided context
-    }
-}
+try await client.handleEHRLaunch(iss: issuer, launch: launchToken)
+let patient = try await client.authorize()
 ```
 
 ##### **OAuth Redirect Handling**
@@ -124,14 +108,6 @@ open func ready() async throws
 ```
 
 Ensures the server has fetched `.well-known/smart-configuration` and is ready for authorization.
-
-> Legacy wrapper (deprecated) returns a `Task` so existing code can opt into cancellation:
->
-> ```swift
-> @discardableResult
-> @available(*, deprecated, renamed: "ready()")
-> open func ready(callback: @escaping (Error?) -> Void) -> Task<Void, Never>
-> ```
 
 ##### **Session Management**
 
@@ -159,8 +135,6 @@ do {
     print("Request failed: \(error)")
 }
 ```
-
-> Callback wrappers remain available (deprecated) and return `Task<Void, Never>` for optional cancellation.
 
 ---
 
@@ -193,8 +167,6 @@ open func getSMARTConfiguration(forceRefresh: Bool = false) async throws -> SMAR
 Fetches and caches `.well-known/smart-configuration`.
 `Server.ready` will fail early if the configuration omits `code_challenge_methods_supported = ["S256"]`, matching SMART App Launch requirements.
 
-> Deprecated completion-handler wrapper returns `Task<Void, Never>` for backwards compatibility.
-
 ##### **Patient Fetch**
 
 ```swift
@@ -214,17 +186,6 @@ do {
     print("Fetch failed: \(error)")
 }
 ```
-
-> Deprecated completion-wrapper:
->
-> ```swift
-> @discardableResult
-> @available(*, deprecated, renamed: "readPatient(id:)")
-> func fetchPatient(
->     id: String,
->     completion: @escaping (Result<ModelsR5.Patient, Error>) -> Void
-> ) -> Task<Void, Never>
-> ```
 
 ##### **Direct FHIRClient Access**
 
@@ -263,7 +224,116 @@ client.authProperties.granularity = .patientSelectWeb
 
 ---
 
-### 4. `LaunchContext` - SMART Launch Context
+### 4. `AuthUIHandler` - Authorization UI Boundary
+
+Defines the UI surface where authorization takes place. The protocol is `Sendable` and its methods are `@MainActor`-isolated so UI code stays on the main thread.
+
+```swift
+public protocol AuthUIHandler: Sendable {
+    @MainActor
+    func presentAuthSession(
+        startURL: URL,
+        callbackScheme: String,
+        oauth: OAuth2
+    ) async throws -> URL
+
+    @MainActor
+    func cancelOngoingAuthSession()
+
+    @MainActor
+    func presentPatientSelector(
+        server: Server,
+        parameters: OAuth2JSON,
+        oauth: OAuth2
+    ) async throws -> OAuth2JSON
+}
+```
+
+Default implementations:
+
+- `iOSAuthUIHandler` – wraps `ASWebAuthenticationSession` and the native patient picker.
+- `macOSAuthUIHandler` – bridges through `ASWebAuthenticationSession`.
+- `NoUIAuthHandler` – available for non-Apple platforms (always throws).
+
+**Example (custom handler for tests):**
+
+```swift
+final class CapturingAuthUIHandler: AuthUIHandler {
+    var startURL: URL?
+
+    @MainActor
+    func presentAuthSession(
+        startURL: URL,
+        callbackScheme: String,
+        oauth: OAuth2
+    ) async throws -> URL {
+        self.startURL = startURL
+        return URL(string: "myapp://callback?code=1234")!
+    }
+
+    @MainActor
+    func cancelOngoingAuthSession() {}
+
+    @MainActor
+    func presentPatientSelector(
+        server: Server,
+        parameters: OAuth2JSON,
+        oauth: OAuth2
+    ) async throws -> OAuth2JSON {
+        return parameters
+    }
+}
+```
+
+Tests can also leverage `MockAuthUIHandler` from `Tests/Mocks` to script success, failure, or cancellation paths.
+
+---
+
+### 5. `AuthCore` - Actor-Isolated OAuth State
+
+Coordinates mutable OAuth2 state and launch context parsing behind the `Auth` façade.
+
+```swift
+public actor AuthCore {
+    public init(
+        oauth: OAuth2?,
+        launchContext: LaunchContext? = nil,
+        launchParameter: String? = nil,
+        logger: OAuth2Logger? = nil
+    )
+
+    public func configure(scope: String)
+    public func hasUnexpiredToken() -> Bool
+    public func handleRedirect(_ url: URL) throws
+    public func forgetTokens()
+    public func signedRequest(forURL url: URL) -> URLRequest?
+    public func parseLaunchContext(from parameters: OAuth2JSON) -> LaunchContext?
+    public func encodeLaunchContext(_ context: LaunchContext) -> [String: Any]?
+    public func withOAuth<Result>(
+        _ operation: (OAuth2) async throws -> Result
+    ) async throws -> Result
+}
+```
+
+`Auth` owns an `AuthCore` instance and uses it to serialize access to the underlying `OAuth2` client, guaranteeing data-race safety even under strict Swift 6 checks.
+
+**Example (unit test):**
+
+```swift
+let oauth = MockOAuth2(settings: ["redirect_uris": ["myapp://callback"]])
+let core = AuthCore(oauth: oauth, logger: nil)
+
+await core.configure(scope: "patient/*.rs")
+XCTAssertEqual(oauth.scope, "patient/*.rs")
+
+try await core.withOAuth { oauth in
+    try await oauth.registerClientIfNeeded()
+}
+```
+
+---
+
+### 6. `LaunchContext` - SMART Launch Context
 
 Parsed from OAuth token response; available at `client.server.launchContext`.
 
@@ -294,7 +364,7 @@ if let context = client.server.launchContext {
 
 ---
 
-### 5. `SMARTConfiguration` - Discovery Document
+### 7. `SMARTConfiguration` - Discovery Document
 
 Parsed from `.well-known/smart-configuration`; available via `server.getSMARTConfiguration()`.
 
@@ -324,7 +394,7 @@ do {
 
 ---
 
-### 6. `PatientList` - Patient Search & Display
+### 8. `PatientList` - Patient Search & Display
 
 Manages paginated patient lists with search and ordering.
 
@@ -365,7 +435,7 @@ patientList.retrieve(fromServer: client.server)
 
 ---
 
-### 7. `PatientListQuery` - Search Query Builder
+### 9. `PatientListQuery` - Search Query Builder
 
 ```swift
 public final class PatientListQuery {
@@ -389,7 +459,7 @@ let patientList = PatientList(query: query)
 
 ---
 
-### 8. `PatientListOrder` - Patient Sorting
+### 10. `PatientListOrder` - Patient Sorting
 
 ```swift
 public enum PatientListOrder: String {
@@ -403,7 +473,7 @@ public enum PatientListOrder: String {
 
 ---
 
-### 9. ModelsR5 Extensions
+### 11. ModelsR5 Extensions
 
 Convenience accessors for FHIR R5 primitives (compatible with old Swift-FHIR patterns).
 
@@ -555,18 +625,22 @@ class ViewController: UIViewController {
     func connect() {
         client.authProperties.granularity = .patientSelectNative
 
-        client.authorize { [weak self] patient, error in
-            guard let patient = patient, error == nil else {
-                print("Authorization failed: \(error)")
-                return
-            }
+        Task { [weak self] in
+            do {
+                guard let patient = try await self?.client.authorize() else {
+                    print("Authorization cancelled")
+                    return
+                }
 
-            print("Authorized! Patient: \(patient.displayNameFamilyGiven)")
-            self?.fetchObservations(for: patient)
+                print("Authorized! Patient: \(patient.displayNameFamilyGiven)")
+                try await self?.fetchObservations(for: patient)
+            } catch {
+                print("Authorization failed: \(error)")
+            }
         }
     }
 
-    func fetchObservations(for patient: ModelsR5.Patient) {
+    func fetchObservations(for patient: ModelsR5.Patient) async throws {
         guard let patientId = patient.id?.value?.string else { return }
 
         let operation = DecodingFHIRRequestOperation<ModelsR5.Bundle>(
@@ -574,18 +648,8 @@ class ViewController: UIViewController {
             headers: ["Accept": "application/fhir+json"]
         )
 
-        var cancellable: AnyCancellable?
-        cancellable = client.server.fhirClient.execute(operation: operation)
-            .sink(
-                receiveCompletion: { completion in
-                    if case .failure(let error) = completion {
-                        print("Search failed: \(error)")
-                    }
-                },
-                receiveValue: { bundle in
-                    print("Received \(bundle.entry?.count ?? 0) observations")
-                }
-            )
+        let bundle = try await client.server.fhirClient.execute(operation: operation)
+        print("Received \(bundle.entry?.count ?? 0) observations")
     }
 }
 
@@ -616,21 +680,16 @@ class SMARTLaunchHandler {
     }
 
     func handleLaunch(iss: String, launch: String) {
-        // Step 1: Process EHR launch parameters
-        client.handleEHRLaunch(iss: iss, launch: launch) { [weak self] error in
-            guard error == nil, let self = self else {
-                print("EHR launch setup failed: \(error)")
-                return
-            }
+        Task { [weak self] in
+            do {
+                guard let self = self else { return }
+                try await self.client.handleEHRLaunch(iss: iss, launch: launch)
 
-            // Step 2: Authorize (this will use the launch context)
-            self.client.authorize { patient, error in
-                guard error == nil else {
-                    print("Authorization failed: \(error)")
+                guard let patient = try await self.client.authorize() else {
+                    print("Authorization cancelled")
                     return
                 }
 
-                // Step 3: Access launch context
                 if let context = self.client.server.launchContext {
                     print("Patient: \(context.patient ?? "none")")
                     print("Encounter: \(context.encounter ?? "none")")
@@ -638,23 +697,18 @@ class SMARTLaunchHandler {
                     print("Need patient banner: \(context.needPatientBanner ?? false)")
                 }
 
-                // Step 4: Make FHIR API calls
-                self.loadPatientData()
+                try await self.loadPatientData(patientId: patient.id?.value?.string)
+            } catch {
+                print("EHR launch setup failed: \(error)")
             }
         }
     }
 
-    func loadPatientData() {
-        guard let patientId = client.server.launchContext?.patient else { return }
+    func loadPatientData(patientId: String?) async throws {
+        guard let patientId else { return }
 
-        client.server.fetchPatient(id: patientId) { result in
-            switch result {
-            case .success(let patient):
-                print("Loaded: \(patient.displayNameFamilyGiven)")
-            case .failure(let error):
-                print("Failed: \(error)")
-            }
-        }
+        let patient = try await client.server.readPatient(id: patientId)
+        print("Loaded: \(patient.displayNameFamilyGiven)")
     }
 }
 
@@ -728,18 +782,22 @@ server.fhirClient.execute(operation: operation)
 ### Example 4: Access Token Inspection
 
 ```swift
-// After successful authorization
-if let accessToken = client.server.auth?.oauth?.accessToken {
-    print("Access token: \(accessToken)")
-    print("Token expires: \(client.server.auth?.oauth?.accessTokenExpiry)")
-}
+Task {
+    if let auth = client.server.auth,
+       let accessToken = await auth.accessToken() {
+        print("Access token: \(accessToken)")
+        if let expiry = try await auth.withOAuth({ $0.clientConfig.accessTokenExpiry }) {
+            print("Token expires: \(expiry)")
+        }
+    }
 
-if let refreshToken = client.server.refreshToken {
-    print("Refresh token available: \(refreshToken)")
-}
+    if let refreshToken = client.server.refreshToken {
+        print("Refresh token available: \(refreshToken)")
+    }
 
-if let idToken = client.server.idToken {
-    print("ID token (OpenID Connect): \(idToken)")
+    if let idToken = client.server.idToken {
+        print("ID token (OpenID Connect): \(idToken)")
+    }
 }
 ```
 
@@ -875,16 +933,16 @@ The following are internal and NOT part of the public API:
 
 ## Migration Guide (from Swift-SMART 1.0)
 
-| Swift-SMART 1.0              | Swift-SMART 2.0 (R5)                  | Notes                       |
-| ---------------------------- | ------------------------------------- | --------------------------- |
-| `Patient.read(id, server:)`  | `server.fetchPatient(id:completion:)` | Static methods removed      |
-| `FHIRSearch`                 | `PatientListQuery`                    | New query builder           |
-| `FHIRError`                  | `SMARTError` + other errors           | Different error types       |
-| `FHIRServerJSONResponse`     | `FHIRClient.Response`                 | New response type           |
-| `.string` on FHIRPrimitive   | `.string` (via extension)             | Compatibility maintained    |
-| `.nsDate` on date primitives | `.nsDate` (via extension)             | Compatibility maintained    |
-| `extension_fhir`             | `` `extension` ``                     | ModelsR5 uses Swift keyword |
-| `.extensions(forURI:)`       | `.extensions(for:)`                   | Renamed parameter           |
+| Swift-SMART 1.0              | Swift-SMART 2.0 (R5)        | Notes                       |
+| ---------------------------- | --------------------------- | --------------------------- |
+| `Patient.read(id, server:)`  | `server.readPatient(id:)`   | Static methods removed      |
+| `FHIRSearch`                 | `PatientListQuery`          | New query builder           |
+| `FHIRError`                  | `SMARTError` + other errors | Different error types       |
+| `FHIRServerJSONResponse`     | `FHIRClient.Response`       | New response type           |
+| `.string` on FHIRPrimitive   | `.string` (via extension)   | Compatibility maintained    |
+| `.nsDate` on date primitives | `.nsDate` (via extension)   | Compatibility maintained    |
+| `extension_fhir`             | `` `extension` ``           | ModelsR5 uses Swift keyword |
+| `.extensions(forURI:)`       | `.extensions(for:)`         | Renamed parameter           |
 
 ---
 
@@ -946,13 +1004,15 @@ The following are internal and NOT part of the public API:
 4. **`PatientListQuery`** - Search query configuration
 5. **`PatientListViewController`** (iOS only) - Native patient selection UI
 
-### Supporting Types (5 structs/enums)
+### Supporting Types (7 structs/protocols)
 
 1. **`SMARTAuthProperties`** - Authorization behavior config
 2. **`SMARTAuthGranularity`** - Authorization granularity options
-3. **`LaunchContext`** - Parsed launch context from token response
-4. **`SMARTConfiguration`** - `.well-known/smart-configuration` data
-5. **`PatientListOrder`** - Patient sorting options
+3. **`AuthUIHandler`** - Main-actor UI boundary for authorization flows
+4. **`AuthCore`** - Actor-isolated OAuth2 state container
+5. **`LaunchContext`** - Parsed launch context from token response
+6. **`SMARTConfiguration`** - `.well-known/smart-configuration` data
+7. **`PatientListOrder`** - Patient sorting options
 
 ### ModelsR5 Extensions (4 categories)
 

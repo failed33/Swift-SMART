@@ -1,19 +1,28 @@
-@testable import SMART
 import OAuth2
 import XCTest
 
+@testable import SMART
+
+@MainActor
 final class OAuth2InterceptorTests: XCTestCase {
     private func makeAuth(accessToken: String?) -> Auth {
         let server = Server(baseURL: URL(string: "https://example.org/fhir")!)
-        let auth = Auth(type: .codeGrant, server: server, settings: nil)
+        let auth = Auth(
+            type: .codeGrant,
+            server: server,
+            aud: server.aud,
+            initialLogger: nil,
+            settings: nil,
+            uiHandler: TestAuthUIHandler()
+        )
         let oauth = OAuth2CodeGrant(settings: [
             "client_id": "test",
             "authorize_uri": "https://example.org/authorize",
             "token_uri": "https://example.org/token",
-            "redirect_uris": ["app://callback"]
+            "redirect_uris": ["app://callback"],
         ])
         oauth.accessToken = accessToken
-        auth.oauth = oauth
+        auth.replaceOAuthForTesting(oauth)
         return auth
     }
 
@@ -45,4 +54,3 @@ final class OAuth2InterceptorTests: XCTestCase {
         XCTAssertNil(modified.value(forHTTPHeaderField: "Authorization"))
     }
 }
-
