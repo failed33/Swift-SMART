@@ -315,6 +315,10 @@ public final class Server {
 			settings["aud"] = aud
 		}
 
+		if let current = authSettings as NSDictionary?, current.isEqual(to: settings) {
+			return
+		}
+
 		authSettings = settings
 	}
 
@@ -420,7 +424,8 @@ public final class Server {
 				return patient
 			}
 
-			if let patientId = parameters["patient"] as? String {
+			if let patientReference = parameters["patient"] as? String {
+				let patientId = Server.normalizeResourceId(patientReference)
 				do {
 					let patient = try await readPatient(id: patientId)
 					logger?.debug(
@@ -568,6 +573,18 @@ private actor ConfigurationCache {
 
 	func clearTask() {
 		runningTask = nil
+	}
+}
+
+// MARK: - Helpers
+
+extension Server {
+	private static func normalizeResourceId(_ reference: String) -> String {
+		guard let slashIndex = reference.lastIndex(of: "/") else {
+			return reference
+		}
+		let start = reference.index(after: slashIndex)
+		return String(reference[start...])
 	}
 }
 

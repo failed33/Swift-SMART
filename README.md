@@ -153,6 +153,16 @@ scripts/test_scripts/standalone_launch.sh
 
 Set `SMART_AUTOMATION_ENDPOINT` if you have an automation worker (e.g., Playwright) listening for authorize URLs and driving the login form. Otherwise the script opens the system browser for manual interaction.
 
+- To validate EHR/context-aware launches end-to-end, configure the new harness:
+
+```bash
+cp scripts/test_scripts/ehr_launch/ehr_launch.env.example scripts/test_scripts/ehr_launch/ehr_launch.env
+# Populate SMART_* and SMART_EHR_* values, then run:
+scripts/test_scripts/ehr_launch/ehr_launch.sh
+```
+
+The script first signs in as the EMR practitioner, posts the launch context to Keycloak (using `Tests/Fixtures/launch-context.json` as a template for all optional fields), and finally runs the `EHRLaunchTests` suite to perform the SMART launch and patient read.
+
 - To run the manual OAuth checklist (authorization_code), set:
 
 ```bash
